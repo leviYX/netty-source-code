@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 ![Build project](https://github.com/netty/netty/workflows/Build%20project/badge.svg)
 
 # Netty Project
@@ -65,3 +66,7 @@ are listed below:
 
 Automatic modules do not provide any means to declare dependencies, so you need to list each used module separately
 in your `module-info` file.
+=======
+# netty-source-code
+netty源码。
+>>>>>>> 662f828260ddc354f704e596d7a42e73d4f39551
