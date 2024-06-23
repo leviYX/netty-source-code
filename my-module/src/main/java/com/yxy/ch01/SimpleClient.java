@@ -1,4 +1,4 @@
-package com.levi.ch01;
+package com.yxy.ch01;
 
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.Logger;
@@ -30,7 +30,7 @@ public class SimpleClient {
         socketChannel.configureBlocking(false);
         //得到selector
         Selector selector = Selector.open();
-        //把客户端的channel注册到selector上
+        //把客户端的channel注册到selector上，此时还没有感兴趣的事件
         SelectionKey selectionKey = socketChannel.register(selector, 0);
         //设置事件
         selectionKey.interestOps(SelectionKey.OP_CONNECT);
@@ -38,8 +38,10 @@ public class SimpleClient {
         socketChannel.connect(new InetSocketAddress(8080));
         //开始轮询事件
         while (true) {
+            logger.info("客户端开始循环，会阻塞在select之前......");
             //无事件则阻塞
             selector.select();
+            logger.info("客户端拿到事件，阻塞放行......");
             //得到事件的key
             Set<SelectionKey> selectionKeys = selector.selectedKeys();
             Iterator<SelectionKey> iterator = selectionKeys.iterator();
