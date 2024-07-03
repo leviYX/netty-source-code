@@ -32,6 +32,7 @@ public class SimpleServer {
         selectionKey.interestOps(SelectionKey.OP_ACCEPT);
         //绑定端口号
         serverSocketChannel.bind(new InetSocketAddress(8080));
+
         //然后开始接受连接,处理事件,整个处理都在一个死循环之中
         while (true) {
             logger.info("服务端开始循环，会阻塞在select之前......");
