@@ -735,6 +735,7 @@ CompletableFuture<V> thenCombineAsync(CompletionStage<? extends U> other,BiFunct
 如果要编排任意数量的CompletableFuture怎么办？可以使用以下方法来组合任意数量的CompletableFuture
 
 ```java
+// 因为他是统合所有的cf的结果，所以也不知道具体哪一个是啥返回值类型，也不知道有没有返回值类型，所以就void
 public static CompletableFuture<Void> allOf(CompletableFuture<?>... cfs)
 public static CompletableFuture<Object> anyOf(CompletableFuture<?>... cfs)
 ```
@@ -759,7 +760,7 @@ public class AllOfDemo {
         // step 1: 创建List集合存储文件名
         List<String> fileList = Arrays.asList("news1.txt", "news2.txt", "news3.txt");
 
-        // step 2: 根据文件名调用readFileFuture创建多个CompletableFuture,并存入List集合中
+        // step 2: 根据文件名调用readFileFuture创建多个CompletableFuture,并存入List集合中，这里就开启异步去做操作了
         List<CompletableFuture<String>> readFileFutureList = fileList.stream().map(fileName -> {
             return readFileFuture(fileName);
         }).collect(Collectors.toList());
