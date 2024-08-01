@@ -36,7 +36,10 @@ public final class EchoServer {
                     // NSSC封装的就是底层创建一个Socket用于listen和bind端口地址，我们把这个叫做监听Socket,
                     .channel(NioServerSocketChannel.class)//配置主Reactor中的channel类型，后面我把他简称为NSSC
                     .option(ChannelOption.SO_BACKLOG, 100)//设置主Reactor中channel的option选项，SO_BACKLOG主要用于设置全连接队列的大小
-                    .handler(new LoggingHandler(LogLevel.INFO))//设置主Reactor中Channel->pipline->handler
+                    // 设置的是服务端NioServerSocketChannel PipeLine中的ChannelHandler。
+                    .handler(new LoggingHandler(LogLevel.INFO))
+                    // 用于设置客户端NioSocketChannel中对应Pipieline中的ChannelHandler。我们通常配置的编码解码器就是在这里。
+                    // ServerBootstrap启动类方法带有child前缀的均是设置客户端NioSocketChannel属性的。
                     .childHandler(new ChannelInitializer<SocketChannel>() {//设置从Reactor中注册channel的pipeline
                         /**
                          * netty有两种Channel类型：一种是服务端用于监听绑定端口地址的NioServerSocketChannel,一种是用于客户端通信的NioSocketChannel。
