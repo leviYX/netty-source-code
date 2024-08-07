@@ -48,6 +48,12 @@
             <artifactId>lombok</artifactId>
             <version>1.16.18</version>
         </dependency>
+            <!-- Netty依赖 -->
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-all</artifactId>
+                <version>4.1.69.Final</version> <!-- 请使用最新的稳定版本 -->
+            </dependency>
 
     </dependencies>
 
