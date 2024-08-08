@@ -380,15 +380,33 @@ public abstract class AbstractNioChannel extends AbstractChannel {
     @Override
     protected void doRegister() throws Exception {
         boolean selected = false;
+        // 这里死循环是为了异常重试 如果异常就一直在这里注册,但是只能重试一次，下面异常处理里面有解释
         for (;;) {
             try {
+                /**
+                 * 发起注册，我们来看一下这个操作，以前我们在nio的时候注册是这样的
+                 * SelectionKey selectionKey = serverSocketChannel.register(selector, 0, serverSocketChannel);
+                 * 我们说netty是nio的封装，那么其实他虽然外面给你用的是ssc，但是底层还是java的sc
+                 * 注册的时候，其实还是java的sc，只不过他封装了nio的操作，那么他怎么把ssc和sc关联起来的呢？就是这里了，我们来看
+                 * javaChannel()：顾名思义就是java的ssc serverSocketChannel
+                 * eventLoop().unwrappedSelector()就是nio里面的selecotr,netty里面的selector就是在每个eventloop里面都初始化了
+                 * 一个，这里我们随便拿一个出来用来注册，但是这个一旦注册了，他就承担了accept的职责，所以就是他了，后面再用也是他
+                 * 其他的eventlop也有selector，但是没注册ssc，不承担这个责任
+                 * 然后这里传了一个0，就是说这里什么事件都不关注，这里还没给selector绑定关心事件呢
+                 * 最后传了一个this，其实就是netty的ssc,也就是NioServerSocketChannel，他是作为附件绑定给ssc的，这样就关联起来了
+                 * 后面你就能一起使用了
+                 *
+                 */
                 selectionKey = javaChannel().register(eventLoop().unwrappedSelector(), 0, this);
                 return;
             } catch (CancelledKeyException e) {
+                // false取反成功进入
                 if (!selected) {
                     // Force the Selector to select now as the "canceled" SelectionKey may still be
                     // cached and not removed because no Select.select(..) operation was called yet.
+                    // 重置SelectionKey
                     eventLoop().selectNow();
+                    // 标记为selected为true,下次循环进来就直接走入else，抛出异常，所以这个只能重试一次
                     selected = true;
                 } else {
                     // We forced a select operation on the selector before but the SelectionKey is still cached

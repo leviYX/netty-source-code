@@ -290,6 +290,7 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
         // 所以返回值是一个future，体现异步
         final ChannelFuture regFuture = initAndRegister();
         final Channel channel = regFuture.channel();
+        // 异常就返回
         if (regFuture.cause() != null) {
             return regFuture;
         }
@@ -314,7 +315,7 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
                         // Registration was successful, so set the correct executor to use.
                         // See https://github.com/netty/netty/issues/2586
                         promise.registered();
-
+                        // 这里开始处理端口绑定
                         doBind0(regFuture, channel, localAddress, promise);
                     }
                 }
@@ -330,7 +331,7 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
             // 同时还创建出来了ServertSocketChannel,这个是java原生的那个，因为她们后面要关联，你netty只是nio的封装
             channel = channelFactory.newChannel();
             // 为ssc做一些初始化配置，一些系统参数，然后添加了一些列pipeLine,这里是ssc的pipeLine，后面会看到,注意此时还没有调用pipeLine的init方法
-            // 只是添加进去了函数式接口实现，还没有做回调呢
+            // 只是添加进去了函数式接口实现，还没有做回调呢，注意，这里是给ssc的pipline添加的函数接口
             init(channel);
         } catch (Throwable t) {
             if (channel != null) {
@@ -342,7 +343,7 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
             // as the Channel is not registered yet we need to force the usage of the GlobalEventExecutor
             return new DefaultChannelPromise(new FailedChannel(), GlobalEventExecutor.INSTANCE).setFailure(t);
         }
-        // 这里就是把ssc注册到selector中
+        // 这里就是把ssc注册到selector中，singleThreadEventLoop中创建的selector，然后返回一个future
         ChannelFuture regFuture = config().group().register(channel);
         if (regFuture.cause() != null) {
             if (channel.isRegistered()) {
@@ -384,6 +385,7 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
             @Override
             public void run() {
                 if (regFuture.isSuccess()) {
+                    // 异步开启任务
                     channel.bind(localAddress, promise).addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
                 } else {
                     promise.setFailure(regFuture.cause());

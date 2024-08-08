@@ -474,12 +474,15 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
                 return;
             }
 
+            // 把这个实现异步注册的eventLoop，绑定在AbstractChannel上，注意这个AbstractChannel是父类，实际这里是ssc
             AbstractChannel.this.eventLoop = eventLoop;
 
+            // 判断当前eventLoop是不是main线程，这个是异步线程池开启的，所以不是
             if (eventLoop.inEventLoop()) {
                 register0(promise);
             } else {
                 try {
+                    // 异步线程池开启，执行注册任务，注册最终在这里完成
                     eventLoop.execute(new Runnable() {
                         @Override
                         public void run() {
@@ -497,6 +500,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
             }
         }
 
+        // 提交在线程池里面的注册任务
         private void register0(ChannelPromise promise) {
             try {
                 // check if the channel is still open as it could be closed in the mean time when the register
@@ -505,14 +509,18 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
                     return;
                 }
                 boolean firstRegistration = neverRegistered;
+                // 注册方法 io.netty.channel.nio.AbstractNioChannel.doRegister
                 doRegister();
                 neverRegistered = false;
                 registered = true;
 
                 // Ensure we call handlerAdded(...) before we actually notify the promise. This is needed as the
                 // user may already fire events through the pipeline in the ChannelFutureListener.
+                // 还记得我们前面注册的时候，给niossc注册的handler是ChannelInitializer，这个里面有一个handlerAdded方法
+                // 添加了一些函数式，这里其实就是来回调的，但是这个回调，他调用了，并且又给里面塞了一个accetp的handler
+                // 注意这个handler只是塞进去了，他的accept还没调用执行呢，所以这里就是回调又塞了一个接口函数，套娃了一波
                 pipeline.invokeHandlerAddedIfNeeded();
-
+                // 注册成功后，触发channelActive事件 ，给promise设置成功，此时开启异步外面的线程就能获得他的状态了
                 safeSetSuccess(promise);
                 pipeline.fireChannelRegistered();
                 // Only fire a channelActive if the channel has never been registered. This prevents firing
@@ -559,6 +567,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
 
             boolean wasActive = isActive();
             try {
+                // 绑定方法 io.netty.channel.nio.AbstractNioChannel.doBind
                 doBind(localAddress);
             } catch (Throwable t) {
                 safeSetFailure(promise, t);

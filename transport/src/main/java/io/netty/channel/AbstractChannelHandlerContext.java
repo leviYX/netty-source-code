@@ -597,6 +597,7 @@ abstract class AbstractChannelHandlerContext implements ChannelHandlerContext, R
                 final ChannelHandler handler = handler();
                 final DefaultChannelPipeline.HeadContext headContext = pipeline.head;
                 if (handler == headContext) {
+                    // 绑定
                     headContext.bind(this, localAddress, promise);
                 } else if (handler instanceof ChannelDuplexHandler) {
                     ((ChannelDuplexHandler) handler).bind(this, localAddress, promise);
