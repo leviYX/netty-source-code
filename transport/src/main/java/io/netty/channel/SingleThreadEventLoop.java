@@ -34,9 +34,12 @@ import java.util.concurrent.ThreadFactory;
  */
 public abstract class SingleThreadEventLoop extends SingleThreadEventExecutor implements EventLoop {
 
+    // tailTasks队列任务长度。默认是Integer.MAX_VALUE，其实就是无界队列。
+    // 你也可以通过系统变量io.netty.eventLoop.maxPendingTasks来设置。来确定是无界队列和有界队列
     protected static final int DEFAULT_MAX_PENDING_TASKS = Math.max(16,
             SystemPropertyUtil.getInt("io.netty.eventLoop.maxPendingTasks", Integer.MAX_VALUE));
 
+    // NioEventLoop可以执行异步任务和定时任务，所以这里需要一个队列
     private final Queue<Runnable> tailTasks;
 
     protected SingleThreadEventLoop(EventLoopGroup parent, ThreadFactory threadFactory, boolean addTaskWakesUp) {

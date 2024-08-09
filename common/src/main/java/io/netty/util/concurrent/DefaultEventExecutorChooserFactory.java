@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Default implementation which uses simple round-robin to choose next {@link EventExecutor}.
+ * 默认的channel和reactor绑定策略，就是轮训
  */
 @UnstableApi
 public final class DefaultEventExecutorChooserFactory implements EventExecutorChooserFactory {
@@ -32,6 +33,8 @@ public final class DefaultEventExecutorChooserFactory implements EventExecutorCh
 
     @Override
     public EventExecutorChooser newChooser(EventExecutor[] executors) {
+        // 这里是对轮训的优化，如果executors.length是2的幂次方，则使用PowerOfTwoEventExecutorChooser，否则使用GenericEventExecutorChooser
+        // 2的幂次方，使用位运算，非2的幂次方，使用取模运算
         if (isPowerOfTwo(executors.length)) {
             return new PowerOfTwoEventExecutorChooser(executors);
         } else {
@@ -53,6 +56,7 @@ public final class DefaultEventExecutorChooserFactory implements EventExecutorCh
 
         @Override
         public EventExecutor next() {
+            // 这里使用位运算，一个数和2的N次方减1做与运算，相当于取模
             return executors[idx.getAndIncrement() & executors.length - 1];
         }
     }
@@ -70,6 +74,7 @@ public final class DefaultEventExecutorChooserFactory implements EventExecutorCh
 
         @Override
         public EventExecutor next() {
+            // 这里使用取模运算，取模的长度是executors.length
             return executors[(int) Math.abs(idx.getAndIncrement() % executors.length)];
         }
     }

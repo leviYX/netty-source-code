@@ -61,6 +61,7 @@ public final class NioEventLoop extends SingleThreadEventLoop {
 
     private static final int CLEANUP_INTERVAL = 256; // XXX Hard-coded value, but won't need customization.
 
+    //Selector优化开关 默认开启 为了遍历的效率 会对Selector中的SelectedKeys进行数据结构优化，就是吧hashset优化成了数组，数组遍历没有hash那些链的问题
     private static final boolean DISABLE_KEY_SET_OPTIMIZATION =
             SystemPropertyUtil.getBoolean("io.netty.noKeySetOptimization", false);
 
@@ -118,7 +119,7 @@ public final class NioEventLoop extends SingleThreadEventLoop {
     private Selector selector;
     private Selector unwrappedSelector;
     private SelectedSelectionKeySet selectedKeys;
-
+    //用于创建JDK NIO Selector,ServerSocketChannel
     private final SelectorProvider provider;
 
     private static final long AWAKE = -1L;
@@ -130,6 +131,7 @@ public final class NioEventLoop extends SingleThreadEventLoop {
     //    other value T    when EL is waiting with wakeup scheduled at time T
     private final AtomicLong nextWakeupNanos = new AtomicLong(AWAKE);
 
+    // Selector轮询策略 决定什么时候轮询，什么时候处理IO事件，什么时候执行异步任务
     private final SelectStrategy selectStrategy;
 
     private volatile int ioRatio = 50;
@@ -141,9 +143,14 @@ public final class NioEventLoop extends SingleThreadEventLoop {
                  EventLoopTaskQueueFactory taskQueueFactory, EventLoopTaskQueueFactory tailTaskQueueFactory) {
         super(parent, executor, false, newTaskQueue(taskQueueFactory), newTaskQueue(tailTaskQueueFactory),
                 rejectedExecutionHandler);
+        //用于创建JDK NIO Selector,ServerSocketChannel
         this.provider = ObjectUtil.checkNotNull(selectorProvider, "selectorProvider");
+        // Selector轮询策略 决定什么时候轮询，什么时候处理IO事件，什么时候执行异步任务
         this.selectStrategy = ObjectUtil.checkNotNull(strategy, "selectStrategy");
+        // 创建Selector openSelector是NioEventLoop类中用于创建IO多路复用的Selector，并对创建出来的JDK NIO 原生的Selector进行性能优化。
+        //首先会通过SelectorProvider#openSelector创建JDK NIO原生的Selector。
         final SelectorTuple selectorTuple = openSelector();
+        // 把优化之后的selector绑定在NIOEventLoop中
         this.selector = selectorTuple.selector;
         this.unwrappedSelector = selectorTuple.unwrappedSelector;
     }
@@ -151,6 +158,7 @@ public final class NioEventLoop extends SingleThreadEventLoop {
     private static Queue<Runnable> newTaskQueue(
             EventLoopTaskQueueFactory queueFactory) {
         if (queueFactory == null) {
+            // 创建队列
             return newTaskQueue0(DEFAULT_MAX_PENDING_TASKS);
         }
         return queueFactory.newTaskQueue(DEFAULT_MAX_PENDING_TASKS);
@@ -174,15 +182,24 @@ public final class NioEventLoop extends SingleThreadEventLoop {
     private SelectorTuple openSelector() {
         final Selector unwrappedSelector;
         try {
+            //通过JDK NIO SelectorProvider创建Selector
             unwrappedSelector = provider.openSelector();
         } catch (IOException e) {
             throw new ChannelException("failed to open a new selector", e);
         }
-
+        // 如果没开启 JDK NIO原生Selector ，Selector优化开关 默认开启需要对Selector进行优化
         if (DISABLE_KEY_SET_OPTIMIZATION) {
             return new SelectorTuple(unwrappedSelector);
         }
 
+        // 但是默认是开启的，所以这里来返回netty优化之后的selector
+        /**
+         * 获取JDK NIO原生Selector的抽象实现类sun.nio.ch.SelectorImpl。JDK NIO原生Selector的实现均继承于该抽象类。
+         * 用于判断由SelectorProvider创建出来的Selector是否为JDK默认实现（SelectorProvider第三种加载方式）。
+         * 因为SelectorProvider可以是自定义加载，所以它创建出来的Selector并不一定是JDK NIO 原生的。
+         * 第三种才是JDK NIO原生Selector的加载方式。前面有两种spi的java.nio.channels.spi.SelectorProvider#provider
+         * JDK原生的就是sun.nio.ch.SelectorImpl
+         */
         Object maybeSelectorImplClass = AccessController.doPrivileged(new PrivilegedAction<Object>() {
             @Override
             public Object run() {
@@ -197,6 +214,10 @@ public final class NioEventLoop extends SingleThreadEventLoop {
             }
         });
 
+        //判断是否可以对Selector进行优化，这里主要针对JDK NIO原生Selector的实现类进行优化，因为SelectorProvider可以加载的是自定义Selector实现
+        //如果SelectorProvider创建的Selector不是JDK原生sun.nio.ch.SelectorImpl的实现类，那么无法进行优化，直接返回
+        // 通过前面对SelectorProvider的介绍我们知道，这里通过provider.openSelector()创建出来的Selector实现类为sun.nio.ch.WindowsSelectorProvider()类，
+        // 它继承实现了sun.nio.ch.SelectorImpl，所以它是JDK NIO 原生的Selector实现
         if (!(maybeSelectorImplClass instanceof Class) ||
             // ensure the current selector implementation is what we can instrument.
             !((Class<?>) maybeSelectorImplClass).isAssignableFrom(unwrappedSelector.getClass())) {
@@ -210,13 +231,16 @@ public final class NioEventLoop extends SingleThreadEventLoop {
         final Class<?> selectorImplClass = (Class<?>) maybeSelectorImplClass;
         final SelectedSelectionKeySet selectedKeySet = new SelectedSelectionKeySet();
 
+        // 开始优化 selectorImplClass就是我们创建出来的那个selector，这里目前是JDK的NIO的
         Object maybeException = AccessController.doPrivileged(new PrivilegedAction<Object>() {
             @Override
             public Object run() {
                 try {
+                    // 使用反射取出JDK Selector里面的两个set集合的属性
                     Field selectedKeysField = selectorImplClass.getDeclaredField("selectedKeys");
                     Field publicSelectedKeysField = selectorImplClass.getDeclaredField("publicSelectedKeys");
 
+                    // Java9版本以上通过sun.misc.Unsafe设置字段值的方式，PlatformDependent底层包装了unsafe，Java9版本以下通过反射设置字段值
                     if (PlatformDependent.javaVersion() >= 9 && PlatformDependent.hasUnsafe()) {
                         // Let us try to use sun.misc.Unsafe to replace the SelectionKeySet.
                         // This allows us to also do this in Java9+ without any extra flags.
@@ -224,6 +248,7 @@ public final class NioEventLoop extends SingleThreadEventLoop {
                         long publicSelectedKeysFieldOffset =
                                 PlatformDependent.objectFieldOffset(publicSelectedKeysField);
 
+                        //   PlatformDependent是netty封装的类，底层用unsafe来对属性字段做处理，但是本身的反射也是Unsafe,这里很奇怪
                         if (selectedKeysFieldOffset != -1 && publicSelectedKeysFieldOffset != -1) {
                             PlatformDependent.putObject(
                                     unwrappedSelector, selectedKeysFieldOffset, selectedKeySet);
@@ -234,6 +259,7 @@ public final class NioEventLoop extends SingleThreadEventLoop {
                         // We could not retrieve the offset, lets try reflection as last-resort.
                     }
 
+                    // 设置反射私有属性可访问，绕过私有属性的不可反射
                     Throwable cause = ReflectionUtil.trySetAccessible(selectedKeysField, true);
                     if (cause != null) {
                         return cause;
@@ -242,7 +268,7 @@ public final class NioEventLoop extends SingleThreadEventLoop {
                     if (cause != null) {
                         return cause;
                     }
-
+                    // 反射设置JDK Selector的selectedKeys和publicSelectedKeys为我们创建的集合
                     selectedKeysField.set(unwrappedSelector, selectedKeySet);
                     publicSelectedKeysField.set(unwrappedSelector, selectedKeySet);
                     return null;
@@ -262,6 +288,13 @@ public final class NioEventLoop extends SingleThreadEventLoop {
         }
         selectedKeys = selectedKeySet;
         logger.trace("instrumented a special java.util.Set into: {}", unwrappedSelector);
+        /**
+         * 所谓的unwrappedSelector是指被Netty优化过的JDK NIO原生Selector。
+         * 所谓的wrappedSelector就是用SelectedSelectionKeySetSelector装饰类将unwrappedSelector和与sun.nio.ch.SelectorImpl类
+         * 关联好的Netty优化实现SelectedSelectionKeySet封装装饰起来。
+         * wrappedSelector会将所有对Selector的操作全部代理给unwrappedSelector，并在发起轮询IO事件的相关操作中，
+         * 重置SelectedSelectionKeySet清空上一次的轮询结果。
+         */
         return new SelectorTuple(unwrappedSelector,
                                  new SelectedSelectionKeySetSelector(unwrappedSelector, selectedKeySet));
     }
@@ -280,6 +313,13 @@ public final class NioEventLoop extends SingleThreadEventLoop {
 
     private static Queue<Runnable> newTaskQueue0(int maxPendingTasks) {
         // This event loop never calls takeTask()
+        /**
+         * Reactor内的异步任务队列的类型为MpscQueue,它是由JCTools提供的一个高性能无锁队列，从命名前缀Mpsc可以看出，
+         * 它适用于多生产者单消费者的场景，它支持多个生产者线程安全的访问队列，同一时刻只允许一个消费者线程读取队列中的元素。
+         *
+         * 我们知道Netty中的Reactor可以线程安全的处理注册其上的多个SocketChannel上的IO数据，保证Reactor线程安全的核心原因正是因为这个MpscQueue，
+         * 它可以支持多个业务线程在处理完业务逻辑后，线程安全的向MpscQueue添加异步写任务，然后由单个Reactor线程来执行这些写任务。既然是单线程执行，那肯定是线程安全的了。
+         */
         return maxPendingTasks == Integer.MAX_VALUE ? PlatformDependent.<Runnable>newMpscQueue()
                 : PlatformDependent.<Runnable>newMpscQueue(maxPendingTasks);
     }

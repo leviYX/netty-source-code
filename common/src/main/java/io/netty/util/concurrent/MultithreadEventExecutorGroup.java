@@ -32,10 +32,18 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public abstract class MultithreadEventExecutorGroup extends AbstractEventExecutorGroup {
 
+    //Reactor线程组中的Reactor集合
     private final EventExecutor[] children;
     private final Set<EventExecutor> readonlyChildren;
     private final AtomicInteger terminatedChildren = new AtomicInteger();
     private final Promise<?> terminationFuture = new DefaultPromise(GlobalEventExecutor.INSTANCE);
+    /**
+     * 从Reactor group中选择一个特定的Reactor的选择策略 用于channel注册绑定到一个固定的Reactor上   Reactor->Channel = 1:N
+     *  默认在构造函数使用的是DefaultEventExecutorChooserFactory.INSTANCE，就是轮训
+     * 首先介绍一个新的构造器参数EventExecutorChooserFactory chooserFactory。当客户端连接完成三次握手后，Main Reactor会创建客户端连接NioSocketChannel，
+     * 并将其绑定到Sub Reactor Group中的一个固定Reactor，那么具体要绑定到哪个具体的Sub Reactor上呢？这个绑定策略就是由chooserFactory来创建的。
+     * 默认为DefaultEventExecutorChooserFactory。
+     */
     private final EventExecutorChooserFactory.EventExecutorChooser chooser;
 
     /**
@@ -70,28 +78,32 @@ public abstract class MultithreadEventExecutorGroup extends AbstractEventExecuto
      */
     protected MultithreadEventExecutorGroup(int nThreads, Executor executor,
                                             EventExecutorChooserFactory chooserFactory, Object... args) {
-        checkPositive(nThreads, "nThreads");
+        checkPositive(nThreads, "nThreads");// 参数检查, 不能小于0
 
         if (executor == null) {
+            //用于创建Reactor线程,这里可以看到ThreadPerTaskExecutor是这个线程池，其实就是实现了JDK的Executor接口
             executor = new ThreadPerTaskExecutor(newDefaultThreadFactory());
         }
 
+        // 初始化subReactor线程的数组
         children = new EventExecutor[nThreads];
-
+        // 循环填充subReactor线程的数组
         for (int i = 0; i < nThreads; i ++) {
             boolean success = false;
             try {
+                //创建reactor
                 children[i] = newChild(executor, args);
                 success = true;
             } catch (Exception e) {
                 // TODO: Think about if this is a good exception type
                 throw new IllegalStateException("failed to create a child event loop", e);
             } finally {
+                // 如果没有创建成功，则关闭所有已经创建的reactor，资源释放
                 if (!success) {
                     for (int j = 0; j < i; j ++) {
                         children[j].shutdownGracefully();
                     }
-
+                    // 可以看到这里非常优雅，各种校验保证能够合理退出
                     for (int j = 0; j < i; j ++) {
                         EventExecutor e = children[j];
                         try {
@@ -108,7 +120,9 @@ public abstract class MultithreadEventExecutorGroup extends AbstractEventExecuto
             }
         }
 
+        // 创建channel到Reactor的绑定策略
         chooser = chooserFactory.newChooser(children);
+
 
         final FutureListener<Object> terminationListener = new FutureListener<Object>() {
             @Override
@@ -119,6 +133,7 @@ public abstract class MultithreadEventExecutorGroup extends AbstractEventExecuto
             }
         };
 
+        // 向Reactor线程组中所有的Reactor注册terminated回调函数, 用于当Reactor线程组中所有的Reactor都关闭时，就可以来调用这个回调发起关闭
         for (EventExecutor e: children) {
             e.terminationFuture().addListener(terminationListener);
         }

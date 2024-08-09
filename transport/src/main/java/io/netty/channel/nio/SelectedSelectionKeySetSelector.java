@@ -52,18 +52,21 @@ final class SelectedSelectionKeySetSelector extends Selector {
 
     @Override
     public int selectNow() throws IOException {
+        //重置SelectedKeys集合
         selectionKeys.reset();
         return delegate.selectNow();
     }
 
     @Override
     public int select(long timeout) throws IOException {
+        //重置SelectedKeys集合
         selectionKeys.reset();
         return delegate.select(timeout);
     }
 
     @Override
     public int select() throws IOException {
+        //重置SelectedKeys集合
         selectionKeys.reset();
         return delegate.select();
     }

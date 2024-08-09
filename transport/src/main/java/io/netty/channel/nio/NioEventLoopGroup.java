@@ -92,8 +92,21 @@ public class NioEventLoopGroup extends MultithreadEventLoopGroup {
         this(nThreads, executor, selectorProvider, DefaultSelectStrategyFactory.INSTANCE);
     }
 
+    /**
+     *
+     * Executor executor：负责启动Reactor线程进而Reactor才可以开始工作。
+     * Reactor线程组NioEventLoopGroup负责创建Reactor线程，在创建的时候会将executor传入。
+     * RejectedExecutionHandler： 当向Reactor添加异步任务添加失败时，采用的拒绝策略。
+     * Reactor的任务不只是监听IO活跃事件和IO任务的处理，还包括对异步任务的处理。
+     * SelectorProvider selectorProvider： Reactor中的IO模型为IO多路复用模型，
+     * 对应于JDK NIO中的实现为java.nio.channels.Selector（就是我们上篇文章中提到的select,poll,epoll），每个Reator中都包含一个Selector，
+     * 用于轮询注册在该Reactor上的所有Channel上的IO事件。SelectorProvider就是用来创建Selector的。
+     * SelectStrategyFactory selectStrategyFactory： Reactor最重要的事情就是轮询注册其上的Channel上的IO就绪事件，
+     * 这里的SelectStrategyFactory用于指定轮询策略，默认为DefaultSelectStrategyFactory.INSTANCE。
+     */
     public NioEventLoopGroup(int nThreads, Executor executor, final SelectorProvider selectorProvider,
                              final SelectStrategyFactory selectStrategyFactory) {
+        // 交给MultithreadEventLoopGroup这个多线程管理EventLoop组去处理，因为我们创建的就是EventLoopGroup
         super(nThreads, executor, selectorProvider, selectStrategyFactory, RejectedExecutionHandlers.reject());
     }
 
@@ -124,8 +137,8 @@ public class NioEventLoopGroup extends MultithreadEventLoopGroup {
      * @param nThreads the number of threads that will be used by this instance.
      * @param executor the Executor to use, or {@code null} if default one should be used.
      * @param chooserFactory the {@link EventExecutorChooserFactory} to use.
-     * @param selectorProvider the {@link SelectorProvider} to use.
-     * @param selectStrategyFactory the {@link SelectStrategyFactory} to use.
+     * @param selectorProvider the {@link SelectorProvider} to use. 用于创建JDK NIO Selector,ServerSocketChannel
+     * @param selectStrategyFactory the {@link SelectStrategyFactory} to use. Selector轮询策略 决定什么时候轮询，什么时候处理IO事件，什么时候执行异步任务
      * @param rejectedExecutionHandler the {@link RejectedExecutionHandler} to use.
      * @param taskQueueFactory the {@link EventLoopTaskQueueFactory} to use for
      *                         {@link SingleThreadEventLoop#execute(Runnable)},
@@ -166,6 +179,7 @@ public class NioEventLoopGroup extends MultithreadEventLoopGroup {
 
     @Override
     protected EventLoop newChild(Executor executor, Object... args) throws Exception {
+        // SelectorProvider创建JDK NIO Selector,ServerSocketChannel
         SelectorProvider selectorProvider = (SelectorProvider) args[0];
         SelectStrategyFactory selectStrategyFactory = (SelectStrategyFactory) args[1];
         RejectedExecutionHandler rejectedExecutionHandler = (RejectedExecutionHandler) args[2];
