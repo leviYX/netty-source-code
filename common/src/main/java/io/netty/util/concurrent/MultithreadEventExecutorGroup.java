@@ -78,7 +78,7 @@ public abstract class MultithreadEventExecutorGroup extends AbstractEventExecuto
      */
     protected MultithreadEventExecutorGroup(int nThreads, Executor executor,
                                             EventExecutorChooserFactory chooserFactory, Object... args) {
-        checkPositive(nThreads, "nThreads");// 参数检查, 不能小于0
+        checkPositive(nThreads, "nThreads");
 
         if (executor == null) {
             //用于创建Reactor线程,这里可以看到ThreadPerTaskExecutor是这个线程池，其实就是实现了JDK的Executor接口
@@ -119,7 +119,6 @@ public abstract class MultithreadEventExecutorGroup extends AbstractEventExecuto
                 }
             }
         }
-
         // 创建channel到Reactor的绑定策略
         chooser = chooserFactory.newChooser(children);
 

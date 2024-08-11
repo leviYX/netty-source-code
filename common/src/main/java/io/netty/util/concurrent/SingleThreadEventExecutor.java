@@ -823,7 +823,9 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     }
 
     private void execute0(@Schedule Runnable task) {
+        // 非空校验
         ObjectUtil.checkNotNull(task, "task");
+        // 执行任务，并判断是否需要唤醒，wakesUpForTask(task)返回的是true，则表示需要唤醒
         execute(task, wakesUpForTask(task));
     }
 
@@ -832,9 +834,14 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     }
 
     private void execute(Runnable task, boolean immediate) {
+        // 判断是否在EventLoop中，如果是则直接执行任务，但是此时线程还是Main,因为这是main提交的任务，目前这个逻辑还在main，任务还没开始执行呢
+        // 所以这里返回的是false
         boolean inEventLoop = inEventLoop();
+        // 添加任务，把task任务放到taskQueue队列中
         addTask(task);
+        // inEventLoop为false，取反成立进入if逻辑
         if (!inEventLoop) {
+            // 开启异步线程，进去看看，这里面应该就会切换线程
             startThread();
             if (isShutdown()) {
                 boolean reject = false;
@@ -853,7 +860,13 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
             }
         }
 
+        // immediate传入的是true所以这里只需要看!addTaskWakesUp是否成立即可
         if (!addTaskWakesUp && immediate) {
+            /**
+             * 这里要唤醒线程，为啥要唤醒呢，因为后面reactor会根据是不是有事件决定是不是要阻塞
+             * 当没有io也没有异步任务的时候，而且定时任务也没有到期，那么reactor线程就会阻塞
+             * 此时你提交任务要是不唤醒，那么reactor线程就会一直阻塞，无法执行你的任务，所以需要唤醒
+             */
             wakeup(inEventLoop);
         }
     }
@@ -948,10 +961,19 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     private static final long SCHEDULE_PURGE_INTERVAL = TimeUnit.SECONDS.toNanos(1);
 
     private void startThread() {
+        // 其中state = ST_NOT_STARTED为初始值，ST_NOT_STARTED = 1，所以这里第一次进来逻辑一定是true
         if (state == ST_NOT_STARTED) {
+            /**
+             * 使用cas修改值，STATE_UPDATER 就是当前这个类SingleThreadEventExecutor的state字段的AtomicIntegerFieldUpdater对象
+             * 所以这里修改的就是这个state字段的值，如果修改成功则返回true，否则返回false，从初始的state = ST_NOT_STARTED = 1修改为
+             * 修改后的state = ST_STARTED = 2，这里是cas操作的
+             * 注意此时还没切换线程，修改成功进入if逻辑，此时这个state已经被修改了，下次就进不来了，所以就创建一次，这里就执行一次
+             */
             if (STATE_UPDATER.compareAndSet(this, ST_NOT_STARTED, ST_STARTED)) {
+                // 成功标记
                 boolean success = false;
                 try {
+                    // 开始启动异步线程
                     doStartThread();
                     success = true;
                 } finally {
@@ -983,10 +1005,13 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
 
     private void doStartThread() {
         assert thread == null;
+        //  executor是一个单线程池，这里开始切换线程开启异步任务
         executor.execute(new Runnable() {
             @Override
             public void run() {
+                // 获取当前线程，存在thread中,此时这里已经在异步线程中执行了，被executor这个异步线程池处理了
                 thread = Thread.currentThread();
+                System.out.println("*****" + thread.getName());
                 if (interrupted) {
                     thread.interrupt();
                 }
@@ -994,6 +1019,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
                 boolean success = false;
                 updateLastExecutionTime();
                 try {
+                    // 执行run方法，也就是SingleThreadEventExecutor的run方法，我们这里的具体实现是NioEventLoop的run方法
                     SingleThreadEventExecutor.this.run();
                     success = true;
                 } catch (Throwable t) {

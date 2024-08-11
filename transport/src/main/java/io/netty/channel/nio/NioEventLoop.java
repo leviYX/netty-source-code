@@ -542,32 +542,65 @@ public final class NioEventLoop extends SingleThreadEventLoop {
 
     @Override
     protected void run() {
+        // 记录轮询次数 用于解决JDK epoll的空轮训bug
         int selectCnt = 0;
+        // 死循环开启
         for (;;) {
             try {
+                // 初始声明一个策略变量
                 int strategy;
                 try {
+                    /*
+                     * 获取策略，我们先来看一下hasTasks()其实现就是return !taskQueue.isEmpty()，也就是当任务队列里面不为空的时候返回true，
+                     * 这里的任务指的是普通io任务，不是selector监听的网络io事件的任务
+                     * 而 selectNowSupplier是一个函数式接口，其实现为selectNow()也就是nio中的selector的selectNow()方法,
+                     * 而selectNow()的其实是一个不阻塞的select()方法，之前我们看到select会一直阻塞直到有事件发生，这个就是不阻塞的版本
+                     * 此时我们进入calculateStrategy方法,他的逻辑就是返回一个select还是selectNow的逻辑，
+                     * 是否存在普通任务/定时任务 如果存在，则返回selectNow()，否则返回select()
+                     * 这里我们分析一下，如果有任务就不阻塞，因为阻塞是在等网络事件，现在有任务你还阻塞，普通任务就卡了，没法处理了
+                     * 如果没任务，那就用网络io事件去阻塞监听就行了，非常合理
+                     * 所以总结一下就是：
+                     * 是否存在普通任务(taskQueue and tailQueue) 如果存在，则返回selectNow()，否则返回select()
+                     * selectNow()执行的时候其实也会查看当前是不是有io事件，也就是selectionkey是不是有就绪的，
+                     * 所以有异步任务：>=0  执行selectNow()查看有几个就绪事件，所以至少是=0，=0就没有就绪io事件，有就是大于0
+                     * 没有异步任务：SelectStrategy.SELECT = -1
+                     *
+                     * 如果Reactor中有异步任务需要执行，那么Reactor线程需要立即执行，不能阻塞在Selector上。
+                     * 在返回前需要再顺带调用selectNow()非阻塞查看一下当前是否有IO就绪事件发生。
+                     * 如果有，那么正好可以和异步任务一起被处理，如果没有，则及时地处理异步任务。
+                     * 这里Netty要表达的语义是：首先Reactor线程需要优先保证IO就绪事件的处理，然后在保证异步任务的及时执行。
+                     * 如果当前没有IO就绪事件但是有异步任务需要执行时，Reactor线程就要去及时执行异步任务而不是继续阻塞在Selector上等待IO就绪事件。
+                     */
                     strategy = selectStrategy.calculateStrategy(selectNowSupplier, hasTasks());
                     switch (strategy) {
                     case SelectStrategy.CONTINUE:
                         continue;
 
                     case SelectStrategy.BUSY_WAIT:
-                        // fall-through to SELECT since the busy-wait is not supported with NIO
+                        // fall-through to SELECT since the busy-wait is not supported with NIO nio不支持自旋
 
                     case SelectStrategy.SELECT:
+                        // 这里已经是没有普通任务了，所以考虑定时任务，这里拿到下一个定时任务执行的时间，如果是-1就表示定时队列里面没有定时任务了
                         long curDeadlineNanos = nextScheduledTaskDeadlineNanos();
                         if (curDeadlineNanos == -1L) {
+                            // 没有定时任务，置为无穷大，这个值表示的就是下次定时任务执行的时间，没任务可不就是无穷大之后执行了
                             curDeadlineNanos = NONE; // nothing on the calendar
                         }
+                        // 把下次执行定时任务的时间保存在nextWakeupNanos里面
                         nextWakeupNanos.set(curDeadlineNanos);
                         try {
+                            // 再次确认，不存在普通任务了
                             if (!hasTasks()) {
+                                // 此时开启select
                                 strategy = select(curDeadlineNanos);
                             }
                         } finally {
                             // This update is just to help block unnecessary selector wakeups
                             // so use of lazySet is ok (no race condition)
+                            // 执行到这里说明Reactor已经从Selector上被唤醒了
+                            // 设置Reactor的状态为苏醒状态AWAKE
+                            // lazySet优化不必要的volatile操作，不使用内存屏障，不保证写操作的可见性（单线程不需要保证）
+                            // reactor就是单线程池
                             nextWakeupNanos.lazySet(AWAKE);
                         }
                         // fall through
@@ -582,40 +615,60 @@ public final class NioEventLoop extends SingleThreadEventLoop {
                     continue;
                 }
 
+                // 下面的代码就是开始执行任务了
                 selectCnt++;
                 cancelledKeys = 0;
                 needsToSelectAgain = false;
                 final int ioRatio = this.ioRatio;
+                // reactor要是执行了任务就给他弄成true
                 boolean ranTasks;
-                if (ioRatio == 100) {
+                if (ioRatio == 100) {// ioRatio是执行io事件的时间比例，默认是50，也就是执行io和任务五五开
                     try {
+                        // 如果这个大于0表明有io事件也有异步任务，那么就执行processSelectedKeys()方法
+                        // 这个方法会把所有的io事件都处理一遍，然后执行异步任务
                         if (strategy > 0) {
                             processSelectedKeys();
                         }
                     } finally {
+                        // 执行完io事件来这里执行异步任务
                         // Ensure we always run tasks.
                         ranTasks = runAllTasks();
                     }
                 } else if (strategy > 0) {
+                    // 如果这个大于0表明有io事件也有异步任务，那么就执行processSelectedKeys()方法
+                    // 这个方法会把所有的io事件都处理一遍，然后执行异步任务
                     final long ioStartTime = System.nanoTime();
                     try {
                         processSelectedKeys();
                     } finally {
                         // Ensure we always run tasks.
                         final long ioTime = System.nanoTime() - ioStartTime;
+                        // 执行完io事件来这里执行异步任务，这里就要计算一下执行任务的时间比例
+                        //
                         ranTasks = runAllTasks(ioTime * (100 - ioRatio) / ioRatio);
                     }
                 } else {
                     ranTasks = runAllTasks(0); // This will run the minimum number of tasks
                 }
 
+                // 如果ranTasks为true说明有任务执行过了，或者说strategy其实是有io事件来过
+                // 所以此时reactor其实做了活儿，不算空唤醒轮训
                 if (ranTasks || strategy > 0) {
+                    /**
+                     * MIN_PREMATURE_SELECTOR_RETURNS默认值512，可以通过参数io.netty.selectorAutoRebuildThreshold来制定
+                     */
                     if (selectCnt > MIN_PREMATURE_SELECTOR_RETURNS && logger.isDebugEnabled()) {
                         logger.debug("Selector.select() returned prematurely {} times in a row for Selector {}.",
                                 selectCnt - 1, selector);
                     }
+                    // 因为不是空唤醒，所以这里归零计数，本次没发生空转bug
                     selectCnt = 0;
-                } else if (unexpectedSelectorWakeup(selectCnt)) { // Unexpected wakeup (unusual case)
+                }
+                // 这个分支就代表，那是真的空转了，所以要判断次数，进去unexpectedSelectorWakeup看看
+                else if (unexpectedSelectorWakeup(selectCnt)) { // Unexpected wakeup (unusual case)
+                    // unexpectedSelectorWakeup(selectCnt)就是判断是不是重建Selector
+                    //既没有IO就绪事件，也没有异步任务，Reactor线程从Selector上被异常唤醒 触发JDK Epoll空轮训BUG
+                    //重新构建Selector,selectCnt归零
                     selectCnt = 0;
                 }
             } catch (CancelledKeyException e) {
@@ -914,12 +967,19 @@ public final class NioEventLoop extends SingleThreadEventLoop {
         return selector.selectNow();
     }
 
+    // 第一个if是开启网络事件的监听，阻塞监听事件，下面的逻辑是判断何时放行selector的阻塞，让死循环能继续走下去，执行定时任务，
+    // 如果定时任务超时了，那么就放行selector的阻塞，让死循环继续走下去，执行定时任务，否则就还没到时间，就阻塞等待timeoutMillis毫秒避免cpu空转
     private int select(long deadlineNanos) throws IOException {
+        // 此时这里也没有普通任务，而且下次定时任务也是无穷大之后才执行，其实就是没有定时任务，这里直接开启网络的selector.select()监听网络事件
         if (deadlineNanos == NONE) {
             return selector.select();
         }
         // Timeout will only be 0 if deadline is within 5 microsecs
+        // 此时这里就是有定时任务，我们把定时任务的纳秒转为毫秒
         long timeoutMillis = deadlineToDelayNanos(deadlineNanos + 995000L) / 1000000L;
+        //timeoutMillis小于0就说明此时存在定时任务，而且已经可以开始执行了，因为可执行时间小于了当前时间，超时了或者到期了差不多，就可以执行了
+        // 所以就立刻调用selector.selectNow()放弃阻塞，往下放行代码，死循环里面开始循环执行定时任务
+        // 如果大于0，就说明此时存在定时任务，但是还没到执行时间，那么就阻塞等待timeoutMillis毫秒，避免cpu空转
         return timeoutMillis <= 0 ? selector.selectNow() : selector.select(timeoutMillis);
     }
 

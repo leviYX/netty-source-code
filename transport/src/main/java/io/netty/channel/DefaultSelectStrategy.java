@@ -27,6 +27,12 @@ final class DefaultSelectStrategy implements SelectStrategy {
 
     @Override
     public int calculateStrategy(IntSupplier selectSupplier, boolean hasTasks) throws Exception {
+        /**
+         * 是否存在普通任务(taskQueue and tailQueue) 如果存在，则返回selectNow()，否则返回select()
+         * selectNow()执行的时候其实也会查看当前是不是有io事件，也就是selectionkey是不是有就绪的，
+         * 所以有异步任务：>=0  执行selectNow()查看有几个就绪事件，所以至少是=0，=0就没有就绪io事件，有就是大于0
+         * 没有异步任务：SelectStrategy.SELECT = -1
+         */
         return hasTasks ? selectSupplier.get() : SelectStrategy.SELECT;
     }
 }
