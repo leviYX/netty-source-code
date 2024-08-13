@@ -10,7 +10,7 @@ import io.netty.handler.logging.LoggingHandler;
 
 public class SampleServer {
     public static void main(String[] args) throws InterruptedException {
-        /*NioEventLoopGroup eventLoopGroup = new NioEventLoopGroup();
+        NioEventLoopGroup eventLoopGroup = new NioEventLoopGroup();
         ServerBootstrap serverBootstrap = new ServerBootstrap();
         serverBootstrap.channel(NioServerSocketChannel.class);
         serverBootstrap.group(eventLoopGroup);
@@ -21,10 +21,7 @@ public class SampleServer {
             }
         });
         Channel channel = serverBootstrap.bind(8080).sync().channel();
-        channel.closeFuture().sync();*/
-        for(;;){
-            System.out.println("9999");
-            return;
-        }
+        channel.closeFuture().sync();
+
     }
 }

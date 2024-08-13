@@ -100,6 +100,7 @@ public abstract class AbstractNioMessageChannel extends AbstractNioChannel {
                 allocHandle.readComplete();
                 pipeline.fireChannelReadComplete();
 
+                // 异常回调
                 if (exception != null) {
                     closed = closeOnReadError(exception);
 
