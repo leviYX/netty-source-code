@@ -35,12 +35,14 @@ public final class DefaultMessageSizeEstimator implements MessageSizeEstimator {
 
         @Override
         public int size(Object msg) {
+            // ByteBuf虽然也可能是堆外的，但是可能会进入堆被处理，所以这里不回避这个case,兼容考虑了
             if (msg instanceof ByteBuf) {
                 return ((ByteBuf) msg).readableBytes();
             }
             if (msg instanceof ByteBufHolder) {
                 return ((ByteBufHolder) msg).content().readableBytes();
             }
+            // FileRegion的内存占用是堆外的，所以这里返回0，不做计算，我们这个方法计算的堆的缓冲区大小
             if (msg instanceof FileRegion) {
                 return 0;
             }

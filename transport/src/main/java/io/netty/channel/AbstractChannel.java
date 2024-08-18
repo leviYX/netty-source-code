@@ -852,6 +852,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
             }
         }
 
+        // 这是writeAndFlush的底层实现
         @Override
         public final void write(Object msg, ChannelPromise promise) {
             assertEventLoop();
@@ -875,6 +876,14 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
             int size;
             try {
                 msg = filterOutboundMessage(msg);
+                /**
+                 * 计算要传输写出数据的大小，因为他不会直接就把数据写出去，而是先放到一个缓冲区中channleOutboundBuffer
+                 * 发出去是flush才发出去，光write是不发出去的，所以需要计算出要写出的数据大小，为了防止消息的积累，避免大量数据堆积在内存缓冲区
+                 * 这里设置了高低水位线，如果写的数据过多了，超过了高水位线，则触发flush，并且停止写入，避免内存溢出，每次写这个缓冲区的时候，
+                 * 都会做累加计算，和高水位线做对比
+                 * 这个size的实现默认位于：io.netty.channel.DefaultMessageSizeEstimator.HandleImpl#size(java.lang.Object)
+                 *
+                 */
                 size = pipeline.estimatorHandle().size(msg);
                 if (size < 0) {
                     size = 0;
@@ -887,25 +896,29 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
                 }
                 return;
             }
-
+            // 添加到缓冲区中，如果超过了高水位线，则触发flush，他不会直接写的，会先写入buffer缓冲区里面
             outboundBuffer.addMessage(msg, size, promise);
         }
 
+        // 这是writeAndFlush的底层实现，但是write只是写java缓冲区，flush才是真正把数据写出去，发送到socket缓冲区中，交给网络发送
         @Override
         public final void flush() {
             assertEventLoop();
 
+            // 这就是那个缓冲区，数据目前都被write到了这里
             ChannelOutboundBuffer outboundBuffer = this.outboundBuffer;
             if (outboundBuffer == null) {
                 return;
             }
-
+            // 对这个buffer中的数据，标记为flush状态，之前刚写进来的是unflush状态，现在变成flush状态了
             outboundBuffer.addFlush();
+            // 真正flush数据的处理，把buffer中flush状态的数据，使用nio的socket和buffer写出去
             flush0();
         }
 
         @SuppressWarnings("deprecation")
         protected void flush0() {
+            // 只处理一次的校验
             if (inFlush0) {
                 // Avoid re-entrance
                 return;
@@ -937,6 +950,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
             }
 
             try {
+                // 真正实现的，这里是真的了 io.netty.channel.socket.nio.NioSocketChannel.doWrite
                 doWrite(outboundBuffer);
             } catch (Throwable t) {
                 handleWriteError(t);

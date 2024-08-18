@@ -113,13 +113,22 @@ public final class ChannelOutboundBuffer {
      * the message was written.
      */
     public void addMessage(Object msg, int size, ChannelPromise promise) {
+        // 他会把我们的消息bytebuf封装为entry,因为他有状态，所以要包装一下，原来的bytebuf没有状态的概念，但是我觉得这里不好，多一次拷贝
         Entry entry = Entry.newInstance(msg, size, total(msg), promise);
+        /**
+         * 而且entry有next指针，所以这里会形成一个链表
+         * 刚创建出来的都是unflushedEntry，只有调用了addFlush才会变成flushedEntry
+         */
+        // 此时还是新的，第一次来这里还没动静
         if (tailEntry == null) {
             flushedEntry = null;
         } else {
+            // 第二次加一个消息进来，此时就这个entry成了tail了，新加进来的就成了尾部
             Entry tail = tailEntry;
             tail.next = entry;
         }
+        // 此时tailEntry已经指向了entry,而且一开始unflushedEntry也是指向entry的，而你后面在添加进来
+        // unflushedEntry就不为null了，他只会永远指向第一个entry，尾部的entry永远指向最后一个
         tailEntry = entry;
         if (unflushedEntry == null) {
             unflushedEntry = entry;
@@ -137,6 +146,10 @@ public final class ChannelOutboundBuffer {
 
         // increment pending bytes after adding message to the unflushed arrays.
         // See https://github.com/netty/netty/issues/1619
+        /**
+         * 这里计算高低水位线
+         *
+         */
         incrementPendingOutboundBytes(entry.pendingSize, false);
     }
 
@@ -149,8 +162,10 @@ public final class ChannelOutboundBuffer {
         // where added in the meantime.
         //
         // See https://github.com/netty/netty/issues/2577
-        Entry entry = unflushedEntry;
+        Entry entry = unflushedEntry;// 这是那个头部的entry
         if (entry != null) {
+            // 此时flushedEntry是null，因为第一次进来，还没flush的呢，所以此时他就把头部那个改成了flushedEntry
+            // 他只改了头部的，这样，整个链表就变成flushed的了，用头来标识
             if (flushedEntry == null) {
                 // there is no flushedEntry yet, so start with the entry
                 flushedEntry = entry;
@@ -183,7 +198,11 @@ public final class ChannelOutboundBuffer {
             return;
         }
 
+        // 在做完addFush之后，然后就把size累加起来，此时就是你写进缓冲区多少数据了
         long newWriteBufferSize = TOTAL_PENDING_SIZE_UPDATER.addAndGet(this, size);
+        // 如果当前写缓冲区大小大于高水位线，则设置不可写，此时你的数据就不会再被写入缓冲区了
+        // 实际开发你写的时候要判断一下ctx.channle().isWriteable()，如果可写就返回true，否则就返回false，false的时候就返回给前端提示
+        // 或者你可以调整这个高水位线，不然会丢包。或者你自己做缓存，后面可写了再写进去https://blog.csdn.net/vivisran/article/details/115107225
         if (newWriteBufferSize > channel.config().getWriteBufferHighWaterMark()) {
             setUnwritable(invokeLater);
         }
@@ -849,8 +868,23 @@ public final class ChannelOutboundBuffer {
         }
 
         static Entry newInstance(Object msg, int size, long total, ChannelPromise promise) {
+            // 他是从缓存池里面获取了一个Entry对象，避免每次都new一个对象，对象复用
             Entry entry = RECYCLER.get();
             entry.msg = msg;
+            /**
+             * bytebuf的大小+CHANNEL_OUTBOUND_BUFFER_ENTRY_OVERHEAD(96字节)
+             * 这里解释一下，我们这个Entry对象里面有有：
+             * 6个引用类型的属性占 8*6=48字节
+             * 2个int类型属性占 4*2=8字节
+             * 2个long类型属性占 8*2=16字节
+             * 1个boolean类型属性占 1字节
+             * 头对象16字节
+             * 填充占位7字节
+             * 总共是96字节，然后加上这个bytebuf的大小，就是最终的size
+             * 之所以要加一个96是为了缓存行的读取和写入，因为缓存行是64字节，所以如果一个Entry对象的大小不是64的倍数，那么就会多占用一些空间
+             * 而这都是64位虚拟机的特性，但是为了兼容其他的，所以他弄成可配置的了。64位比较多而已。
+             * 还有的指针压缩之类的，还能根据实际你自己配置
+             */
             entry.pendingSize = size + CHANNEL_OUTBOUND_BUFFER_ENTRY_OVERHEAD;
             entry.total = total;
             entry.promise = promise;

@@ -384,7 +384,9 @@ public class NioSocketChannel extends AbstractNioByteChannel implements io.netty
 
     @Override
     protected void doWrite(ChannelOutboundBuffer in) throws Exception {
+        // 获取nio的SocketChannel，毕竟netty只是java nio的封装，底层还是nio干活
         SocketChannel ch = javaChannel();
+        // 最大写次数，默认是16，但是可以配置。怕数据量太大，一次发不完，又一直占着线程，，就先写16次，后面再处理
         int writeSpinCount = config().getWriteSpinCount();
         do {
             if (in.isEmpty()) {
@@ -395,30 +397,48 @@ public class NioSocketChannel extends AbstractNioByteChannel implements io.netty
             }
 
             // Ensure the pending writes are made of ByteBufs only.
+            /**
+             * 获取send socket缓冲区大小，netty是可以通过配置修改缓冲区大小的这里提一嘴，底层还是native
+             * SO_SNDBUF其实就是
+             */
             int maxBytesPerGatheringWrite = ((NioSocketChannelConfig) config).getMaxBytesPerGatheringWrite();
+            // 获取nio的缓冲区数组，netty是封装了nio的，底层还是nio，in就是我们这里要flush的那个缓冲区，作为参数传进来的，里面放了一个一个的
+            // netty的butebuf，里面放的是netty的bytebuf，不是nio的bytebuf，所以这里获取的是netty的bytebuf
+            // 这里是要用nio发了，但是nio只认识bytebuffer，所以这里把netty的bytebuf转成nio的bytebuffer，一对一做成数组
+            // 一对一可以更简单，你要是多个bytebuf放一个butebuffer，那就得弄那一堆读写指针，太复杂了
+            // 这里1024的意思是我只取了你1024个bytebuf，如果不够1024个，那就取你剩下的，反正netty的bytebuf是按顺序放的，所以取1024个
+            // 而maxBytesPerGatheringWrite是socket的缓冲区，是保证我的数据量别超了，但是这个缓冲区可以动态调整(tcp知识)
             ByteBuffer[] nioBuffers = in.nioBuffers(1024, maxBytesPerGatheringWrite);
+            // bytebuffer数组的长度，也就是多少个bytebuf，缓冲区里面有多少的消息
             int nioBufferCnt = in.nioBufferCount();
 
             // Always use nioBuffers() to workaround data-corruption.
             // See https://github.com/netty/netty/issues/2761
             switch (nioBufferCnt) {
-                case 0:
+                case 0:// 0个元素，啥也不发
                     // We have something else beside ByteBuffers to write so fallback to normal writes.
                     writeSpinCount -= doWrite0(in);
                     break;
                 case 1: {
-                    // Only one ByteBuf so use non-gathering write
+                    // Only one ByteBuf so use non-gathering write 只有一个bytebuf
                     // Zero length buffers are not added to nioBuffers by ChannelOutboundBuffer, so there is no need
                     // to check if the total size of all the buffers is non-zero.
+                    // 只有一个就取0号元素
                     ByteBuffer buffer = nioBuffers[0];
+                    // 下面就是nio的写数据流程
                     int attemptedBytes = buffer.remaining();
                     final int localWrittenBytes = ch.write(buffer);
+                    // 这里写完之后，判断返回值是不是小于等于0，如果是说明socket缓冲区满了，不能继续写数据了，此时
+                    // 对应我们当初nio的操作，注册一个opWrite事件，等待下次触发，触发的时机就是socket有空的了，就会发事件
                     if (localWrittenBytes <= 0) {
                         incompleteWrite(true);
                         return;
                     }
+                    // 来到这里，就是写完了，但是缓冲区没满，说明消息少于socket缓冲区大小，这里就尝试调整一下socket缓冲区大小，避免浪费
                     adjustMaxBytesPerGatheringWrite(attemptedBytes, localWrittenBytes, maxBytesPerGatheringWrite);
+                    // 写完之后，把nio缓冲区里面的数据都移除掉，因为已经写完了
                     in.removeBytes(localWrittenBytes);
+                    // 写完了，减少一次写次数
                     --writeSpinCount;
                     break;
                 }
