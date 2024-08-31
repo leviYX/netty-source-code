@@ -29,6 +29,8 @@ import java.util.concurrent.ThreadFactory;
 /**
  * Abstract base class for {@link EventLoopGroup} implementations that handles their tasks with multiple threads at
  * the same time.
+ * MultithreadEventLoopGroup类主要的功能就是用来确定Reactor线程组内Reactor的个数。他的很多属性都在父类MultithreadEventExecutorGroup中，
+ * 所以有些属性要看这个父类
  *
  */
 public abstract class MultithreadEventLoopGroup extends MultithreadEventExecutorGroup implements EventLoopGroup {

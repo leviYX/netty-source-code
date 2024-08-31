@@ -94,15 +94,17 @@ public class NioEventLoopGroup extends MultithreadEventLoopGroup {
 
     /**
      *
-     * Executor executor：负责启动Reactor线程进而Reactor才可以开始工作。
+     * Executor executor：负责启动Reactor线程进而Reactor才可以开始工作。其实就是线程
      * Reactor线程组NioEventLoopGroup负责创建Reactor线程，在创建的时候会将executor传入。
      * RejectedExecutionHandler： 当向Reactor添加异步任务添加失败时，采用的拒绝策略。
      * Reactor的任务不只是监听IO活跃事件和IO任务的处理，还包括对异步任务的处理。
      * SelectorProvider selectorProvider： Reactor中的IO模型为IO多路复用模型，
-     * 对应于JDK NIO中的实现为java.nio.channels.Selector（就是我们上篇文章中提到的select,poll,epoll），每个Reator中都包含一个Selector，
+     * 对应于JDK NIO中的实现为java.nio.channels.Selector（就是select,poll,epoll），每个Reator中都包含一个Selector，
+     * 也就是服务端用来处理监听连接的有自己的selector,而客户端连接上的reactor也有自己的selector。在那不断轮训，等待事件
      * 用于轮询注册在该Reactor上的所有Channel上的IO事件。SelectorProvider就是用来创建Selector的。
      * SelectStrategyFactory selectStrategyFactory： Reactor最重要的事情就是轮询注册其上的Channel上的IO就绪事件，
-     * 这里的SelectStrategyFactory用于指定轮询策略，默认为DefaultSelectStrategyFactory.INSTANCE。
+     * 这里的SelectStrategyFactory用于指定轮询策略，默认为DefaultSelectStrategyFactory.INSTANCE。比如一个客户端的reactor
+     * 上面可能有多个客户端连接注册在上面，他就会在selector上轮训这些连接。注意以前我们NIO是一个一个的，这里每个reactor都有多个客户端连接
      */
     public NioEventLoopGroup(int nThreads, Executor executor, final SelectorProvider selectorProvider,
                              final SelectStrategyFactory selectStrategyFactory) {
