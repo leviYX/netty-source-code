@@ -394,7 +394,10 @@ public abstract class AbstractNioChannel extends AbstractChannel {
                  * 其他的eventlop也有selector，但是没注册ssc，不承担这个责任
                  * 然后这里传了一个0，就是说这里什么事件都不关注，这里还没给selector绑定关心事件呢
                  * 最后传了一个this，其实就是netty的ssc,也就是NioServerSocketChannel，他是作为附件绑定给ssc的，这样就关联起来了
-                 * 后面你就能一起使用了
+                 * 后面你就能一起使用了，因为此时我们正处于AbstChannel的内部，所以this就是NioServerSocketChannel，
+                 * 他是AbstChannel的子类，所以this可以是NioServerSocketChannel，此时这里注册的还是NIO的，
+                 * 但是却把netty的ssc作为附件绑定了，这就关联上了。当初创建niossc和ssc的时候他是两个都创建了，同时存在了channel中
+                 * 这下再次印证了channle是一切的流程串联
                  *
                  */
                 selectionKey = javaChannel().register(eventLoop().unwrappedSelector(), 0, this);

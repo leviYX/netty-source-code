@@ -287,7 +287,7 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
     // 这里实现真正的bind方法，看的出来是和spring一样的，do开头的是真正实现逻辑的地方
     private ChannelFuture doBind(final SocketAddress localAddress) {
         // 创建ssc，并且把ssc注册到selector中，因为selector是在evevntloop中创建的，所以这里会有异步的操作
-        // 所以返回值是一个future，体现异步
+        // 所以返回值是一个future，体现了内部其实做了异步操作
         final ChannelFuture regFuture = initAndRegister();
         final Channel channel = regFuture.channel();
         // 异常就返回
@@ -298,6 +298,7 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
         if (regFuture.isDone()) {
             // At this point we know that the registration was complete and successful.
             ChannelPromise promise = channel.newPromise();
+            // 这里是真正完成端口绑定工作的地方
             doBind0(regFuture, channel, localAddress, promise);
             return promise;
         } else {
@@ -329,9 +330,10 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
         try {
             // 底层是反射创建channel，这个channel是netty自己实现的，不是java的,是netty的ssc也就是NioServertSocketChannel
             // 同时还创建出来了ServertSocketChannel,这个是java原生的那个，因为她们后面要关联，你netty只是nio的封装
+            // 底层创建了netty的ssc，然后创建java原生的那个都创建了出来
             channel = channelFactory.newChannel();
-            // 为ssc做一些初始化配置，一些系统参数，然后添加了一些列pipeLine,这里是ssc的pipeLine，后面会看到,注意此时还没有调用pipeLine的init方法
-            // 只是添加进去了函数式接口实现，还没有做回调呢，注意，这里是给ssc的pipline添加的函数接口
+            // 为ssc做一些初始化配置，一些系统参数，然后添加了一些列pipeLine,这里是netty的ssc的pipeLine，后面会看到,注意此时还没有调用pipeLine的init方法
+            // 只是添加进去了函数式接口实现，还没有做回调呢，注意，这里是给ssc的pipline添加的函数接口，这里的channel是netty的ssc，不是java的
             init(channel);
         } catch (Throwable t) {
             if (channel != null) {
@@ -343,7 +345,8 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
             // as the Channel is not registered yet we need to force the usage of the GlobalEventExecutor
             return new DefaultChannelPromise(new FailedChannel(), GlobalEventExecutor.INSTANCE).setFailure(t);
         }
-        // 这里就是把ssc注册到selector中，singleThreadEventLoop中创建的selector，然后返回一个future
+        // 这里就是把nio的ssc注册到selector中，注册进来，开始监听事件，singleThreadEventLoop中创建的selector，然后返回一个future
+        // 每个eventloop中创建的selector，然后返回一个future，体现了内部其实做了异步操作
         ChannelFuture regFuture = config().group().register(channel);
         if (regFuture.cause() != null) {
             if (channel.isRegistered()) {

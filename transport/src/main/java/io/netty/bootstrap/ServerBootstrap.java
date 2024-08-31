@@ -141,6 +141,9 @@ public class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, ServerCh
         final Entry<AttributeKey<?>, Object>[] currentChildAttrs = newAttributesArray(childAttrs);
         final Collection<ChannelInitializerExtension> extensions = getInitializerExtensions();
 
+        // 这里给NIoServerChannel添加一个ChannelInitializer，用于初始化channel，ChannelInitializer也是个handler
+        // ChannelInitializer是个用来初始化其他handler的全局handler，这里都是只把函数参数添加进去了，还没调用呢，后续肯定
+        // 会有地方拿到NioServerSocketChannel的pipline来做这里添加的函数表达式的回调
         p.addLast(new ChannelInitializer<Channel>() {
             @Override
             public void initChannel(final Channel ch) {

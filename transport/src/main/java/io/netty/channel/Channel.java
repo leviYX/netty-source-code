@@ -74,6 +74,11 @@ import java.net.SocketAddress;
  * resources once you are done with the {@link Channel}. This ensures all resources are
  * released in a proper way, i.e. filehandles.
  */
+
+/**
+ * 所有的操作都是基于channel的，你可以看到他的属性其实有你在netty见到的所有东西，最后注入进来，他这里就有了所有能力
+ * 进行你做的那一堆操作。
+ */
 public interface Channel extends AttributeMap, ChannelOutboundInvoker, Comparable<Channel> {
 
     /**
@@ -95,7 +100,7 @@ public interface Channel extends AttributeMap, ChannelOutboundInvoker, Comparabl
     Channel parent();
 
     /**
-     * Returns the configuration of this channel.
+     * Returns the configuration of this channel. 可以配置一堆tcp参数
      */
     ChannelConfig config();
 
@@ -181,11 +186,13 @@ public interface Channel extends AttributeMap, ChannelOutboundInvoker, Comparabl
 
     /**
      * Returns an <em>internal-use-only</em> object that provides unsafe operations.
+     * netty的unsafe
      */
     Unsafe unsafe();
 
     /**
      * Return the assigned {@link ChannelPipeline}.
+     * netty的pipeline，netty的channel中，pipeline是用来处理消息的
      */
     ChannelPipeline pipeline();
 
