@@ -138,7 +138,9 @@ public class NioServerSocketChannel extends AbstractNioMessageChannel
     @Override
     protected void doBind(SocketAddress localAddress) throws Exception {
         if (PlatformDependent.javaVersion() >= 7) {
-            // 这里才开始绑定，这个config是netty的全联接配置
+            // 这里才开始绑定，这个config.getBacklog()是netty的全连接队列，也就是完成三次握手的连接会扔到这个队列。
+            // 配置，我们看到他是用的java的nio的ssc来做的绑定，localAddress就是你的服务端地址ip
+            // 而这里最终来到了nio的绑定，我们再一次说，netty是nio的封装
             javaChannel().bind(localAddress, config.getBacklog());
         } else {
             javaChannel().socket().bind(localAddress, config.getBacklog());

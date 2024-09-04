@@ -892,6 +892,8 @@ public class DefaultChannelPipeline implements ChannelPipeline {
 
     @Override
     public final ChannelPipeline fireChannelActive() {
+        // 调用headhandler的channelActive方法，而head里面他会继续传导链表下一个handler的channelActive方法
+        // 最终会调用到AccceptorChannel的channelActive方法
         AbstractChannelHandlerContext.invokeChannelActive(head);
         return this;
     }
@@ -1331,6 +1333,7 @@ public class DefaultChannelPipeline implements ChannelPipeline {
         @Override
         public void bind(
                 ChannelHandlerContext ctx, SocketAddress localAddress, ChannelPromise promise) {
+            // 执行位于io.netty.channel.AbstractChannel.AbstractUnsafe.bind
             unsafe.bind(localAddress, promise);
         }
 

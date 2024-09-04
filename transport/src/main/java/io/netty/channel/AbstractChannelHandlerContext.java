@@ -576,6 +576,7 @@ abstract class AbstractChannelHandlerContext implements ChannelHandlerContext, R
         final AbstractChannelHandlerContext next = findContextOutbound(MASK_BIND);
         EventExecutor executor = next.executor();
         if (executor.inEventLoop()) {
+            // 绑定的执行
             next.invokeBind(localAddress, promise);
         } else {
             safeExecute(executor, new Runnable() {

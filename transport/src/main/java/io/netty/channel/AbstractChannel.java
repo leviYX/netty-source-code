@@ -523,6 +523,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
                 // 你断点走下去可以看到，他回去执行那个回调了。但是只是加了accept的handler，这个handler还没执行呢。
                 pipeline.invokeHandlerAddedIfNeeded();
                 // 注册成功后，触发channelActive事件 ，给promise设置成功，此时开启异步外面的线程就能获得他的状态了
+                // 这是异步通知外部调用线程的，promise.setSuccess(this);promise的语义，外部就能拿到这个结果了
                 safeSetSuccess(promise);
                 pipeline.fireChannelRegistered();
                 // Only fire a channelActive if the channel has never been registered. This prevents firing
@@ -569,7 +570,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
 
             boolean wasActive = isActive();
             try {
-                // 绑定方法 io.netty.channel.nio.AbstractNioChannel.doBind
+                // 绑定方法，完成绑定端口 io.netty.channel.nio.AbstractNioChannel.doBind
                 doBind(localAddress);
             } catch (Throwable t) {
                 safeSetFailure(promise, t);
@@ -577,10 +578,18 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
                 return;
             }
 
+            // 此时绑定完成，通道被创建完毕，下面开始触发channelActive事件，这里就是给你的服务端注册感兴趣的accept事件
             if (!wasActive && isActive()) {
+                // 使用eventloop来执行一个task
                 invokeLater(new Runnable() {
                     @Override
                     public void run() {
+                        // 这里的pipeline是niossc的pipeline，里面塞了ChannelInitializer
+                        // 而且前面回调执行了这个ChannelInitializer的handlerAdded方法，里面塞了accept的handler
+                        // 而这里的fireChannelActive是要把你pipeline的里面的所有的handler的ChannelActive方法
+                        // 此时这里的handler是headcontext tailcontext 还有accept的handler,以及一些我们自己定义进去的
+                        // 但是我们很少在niossc的pipeline里面定义，所以这里就是回调了headcontext tailcontext
+                        // accepthandler
                         pipeline.fireChannelActive();
                     }
                 });
