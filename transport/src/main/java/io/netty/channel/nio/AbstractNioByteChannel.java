@@ -276,14 +276,17 @@ public abstract class AbstractNioByteChannel extends AbstractNioChannel {
     @Override
     protected final Object filterOutboundMessage(Object msg) {
         if (msg instanceof ByteBuf) {
+            // 如果你是ByteBuf，他会判断你是不是直接内存，如果是直接内存，则返回这个对象，否则会包装一个DirectBuffer。他要用直接内存
+            // 有助于他减少一次拷贝，影响效率
             ByteBuf buf = (ByteBuf) msg;
             if (buf.isDirect()) {
                 return msg;
             }
-
+            // 给你包成直接内存的ByteBuf，但是也是有条件的
             return newDirectBuffer(buf);
         }
 
+        // 如果你是FileRegion，则直接返回这个对象
         if (msg instanceof FileRegion) {
             return msg;
         }

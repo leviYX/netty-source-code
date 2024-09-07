@@ -424,6 +424,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
     }
 
     /**
+     * AbstractUnsafe是真正最后完成read write操作的地方
      * {@link Unsafe} implementation which sub-classes must extend and use.
      */
     protected abstract class AbstractUnsafe implements Unsafe {
@@ -863,7 +864,9 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
             }
         }
 
-        // 这是writeAndFlush的底层实现
+        // 这是writeAndFlush的底层实现,这个msg就是bytebuf或者FileRegion，netty最后输出的在他的层面就是这个玩意
+        // FileRegion是netty用来做大文件处理的，人家优化了。而且你要是btyebuf是不是直接内存，他是要用直接内存的，你就算不是他也给你转
+        // 因为可以减少一次拷贝
         @Override
         public final void write(Object msg, ChannelPromise promise) {
             assertEventLoop();
@@ -886,6 +889,8 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
 
             int size;
             try {
+                // 过滤msg，处理你是bytebuf还是FileRegion，然后计算出要传输的数据大小,并且要是bytebuf给你转为直接内存
+                // io.netty.channel.nio.AbstractNioByteChannel.filterOutboundMessage
                 msg = filterOutboundMessage(msg);
                 /**
                  * 计算要传输写出数据的大小，因为他不会直接就把数据写出去，而是先放到一个缓冲区中channleOutboundBuffer

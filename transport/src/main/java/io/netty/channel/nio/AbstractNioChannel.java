@@ -456,14 +456,21 @@ public abstract class AbstractNioChannel extends AbstractChannel {
      * Returns an off-heap copy of the specified {@link ByteBuf}, and releases the original one.
      * Note that this method does not create an off-heap copy if the allocation / deallocation cost is too high,
      * but just returns the original {@link ByteBuf}..
+     * 下面的逻辑说明一件事，如果我的内存块里面有池化，或者本地线程有缓存内存，也就是本地池，那我才转成直接内存，因为创建直接内存实在有开销
+     * 所以我们有能现成利用的，我就转，否则还是算了。
+     * 换言之，netty不会使用非池化的直接内存，不管是池里有还是本地池有那我才用
+     * 本地池是tl的池话，这个后面看看，看上去池化分为公共池和线程本地池，本地池只有当前线程能用，因为他本质就是threadlocal,只不过netty优化成了
+     * FastThreadlocal
      */
     protected final ByteBuf newDirectBuffer(ByteBuf buf) {
         final int readableBytes = buf.readableBytes();
+        // 如果你这个bytebuf是空的，那么就释放掉，你没数据，我处理锤子，没意义，直接释放掉
         if (readableBytes == 0) {
             ReferenceCountUtil.safeRelease(buf);
             return Unpooled.EMPTY_BUFFER;
         }
 
+        // ByteBufAllocator可以配置，配置是不是池化内存，如果你是池化内存，那么就转为直接内存
         final ByteBufAllocator alloc = alloc();
         if (alloc.isDirectBufferPooled()) {
             ByteBuf directBuf = alloc.directBuffer(readableBytes);
@@ -472,6 +479,8 @@ public abstract class AbstractNioChannel extends AbstractChannel {
             return directBuf;
         }
 
+        // 如果我这个线程的fastthreadlocalbuffer不为空，那么就转成直接内存,这个是通过io.netty.threadLocalDirectBufferSize配置的
+        // 默认大小为0，我们没配置就是不开启，所以这个分支你不配置参数就不走
         final ByteBuf directBuf = ByteBufUtil.threadLocalDirectBuffer();
         if (directBuf != null) {
             directBuf.writeBytes(buf, buf.readerIndex(), readableBytes);
