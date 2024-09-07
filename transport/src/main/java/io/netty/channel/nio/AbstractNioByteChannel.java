@@ -145,9 +145,14 @@ public abstract class AbstractNioByteChannel extends AbstractNioChannel {
 
             ByteBuf byteBuf = null;
             boolean close = false;
+            // 水平触发和边缘触发的区别
             try {
                 do {
+                    // 分配一个ByteBuf，并且可以决定创建的是直接内存还是堆内存，一般如果你做io来接收数据都是直接内存，可以减少一次拷贝
+                    // 这种创建方式是可以完成大小的扩容和缩容的。内部有逻辑，我们点进去看看。
+                    // io.netty.channel.DefaultMaxMessagesRecvByteBufAllocator.MaxMessageHandle.allocate
                     byteBuf = allocHandle.allocate(allocator);
+                    // 调用io.netty.channel.AdaptiveRecvByteBufAllocator.HandleImpl.lastBytesRead
                     allocHandle.lastBytesRead(doReadBytes(byteBuf));
                     if (allocHandle.lastBytesRead() <= 0) {
                         // nothing was read. release the buffer.
@@ -167,6 +172,7 @@ public abstract class AbstractNioByteChannel extends AbstractNioChannel {
                     byteBuf = null;
                 } while (allocHandle.continueReading());
 
+                // 当次次循环结束，进行通道读取完成和异常处理，这个readComplete执行一次
                 allocHandle.readComplete();
                 pipeline.fireChannelReadComplete();
 

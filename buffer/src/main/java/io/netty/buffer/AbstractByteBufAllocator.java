@@ -134,11 +134,22 @@ public abstract class AbstractByteBufAllocator implements ByteBufAllocator {
         return heapBuffer(DEFAULT_INITIAL_CAPACITY);
     }
 
+    /**
+     * 这里返回的ByteBuf会放在fastThreadPool中的，缓存在当前线程中，所以是线程安全的，而且节省再次创建的开销
+     * @param initialCapacity
+     * @return
+     */
     @Override
     public ByteBuf ioBuffer(int initialCapacity) {
+        /**
+         * PlatformDependent.hasUnsafe() 目前我的jdk版本是true，他判断的是我们的类路径有没有Unsafe,这个会在高版本移除，但是截止到21，还没有移除
+         * 而isDirectBufferPooled() 的逻辑是通过外部配置的，默认是true，也就是使用堆外内存
+         */
         if (PlatformDependent.hasUnsafe() || isDirectBufferPooled()) {
+            // 返回直接内存的ByteBuf
             return directBuffer(initialCapacity);
         }
+        // 返回堆内存的ByteBuf
         return heapBuffer(initialCapacity);
     }
 
