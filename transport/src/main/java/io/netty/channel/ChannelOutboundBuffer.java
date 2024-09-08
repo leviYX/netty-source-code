@@ -114,6 +114,7 @@ public final class ChannelOutboundBuffer {
      */
     public void addMessage(Object msg, int size, ChannelPromise promise) {
         // 他会把我们的消息bytebuf封装为entry,因为他有状态，所以要包装一下，原来的bytebuf没有状态的概念，但是我觉得这里不好，多一次拷贝
+        // 可以进去看看，这里设计很多东西
         Entry entry = Entry.newInstance(msg, size, total(msg), promise);
         /**
          * 而且entry有next指针，所以这里会形成一个链表
@@ -147,7 +148,7 @@ public final class ChannelOutboundBuffer {
         // increment pending bytes after adding message to the unflushed arrays.
         // See https://github.com/netty/netty/issues/1619
         /**
-         * 这里计算高低水位线
+         * 这里计算高低水位线，可以看看，很精妙
          *
          */
         incrementPendingOutboundBytes(entry.pendingSize, false);
@@ -202,8 +203,10 @@ public final class ChannelOutboundBuffer {
         long newWriteBufferSize = TOTAL_PENDING_SIZE_UPDATER.addAndGet(this, size);
         // 如果当前写缓冲区大小大于高水位线，则设置不可写，此时你的数据就不会再被写入缓冲区了
         // 实际开发你写的时候要判断一下ctx.channle().isWriteable()，如果可写就返回true，否则就返回false，false的时候就返回给前端提示
-        // 或者你可以调整这个高水位线，不然会丢包。或者你自己做缓存，后面可写了再写进去https://blog.csdn.net/vivisran/article/details/115107225
+        // 或者你可以调整这个高水位线，不然会丢包。或者你自己做缓存，后面可写了再写进去可以参考这个
+        // https://blog.csdn.net/vivisran/article/details/115107225
         if (newWriteBufferSize > channel.config().getWriteBufferHighWaterMark()) {
+            // 如果你此时写缓冲区的数据大小大于了高水位线，设置当前的socketChannel不可以写了
             setUnwritable(invokeLater);
         }
     }
@@ -320,6 +323,7 @@ public final class ChannelOutboundBuffer {
                 ReferenceCountUtil.safeRelease(msg);
             }
             safeSuccess(promise);
+            // 调整水位线
             decrementPendingOutboundBytes(size, false, true);
         }
 
@@ -448,12 +452,15 @@ public final class ChannelOutboundBuffer {
      * @param maxBytes A hint toward the maximum number of bytes to include as part of the return value. Note that this
      *                 value maybe exceeded because we make a best effort to include at least 1 {@link ByteBuffer}
      *                 in the return value to ensure write progress is made.
+     *   sc创建一个nioBuffer用来放netty的bytebuf，用nio来发出
      */
     public ByteBuffer[] nioBuffers(int maxCount, long maxBytes) {
         assert maxCount > 0;
         assert maxBytes > 0;
         long nioBufferSize = 0;
         int nioBufferCount = 0;
+        // 从tl中获取butebuffer，如果你tl中有就获取出来，等于对于当前线程的一个本地线程的bytebuffer池，预先存在了tl中，
+        // 不是你现用现创建的，你这个客户端绑定的线程连接上来多次都可以用，
         final InternalThreadLocalMap threadLocalMap = InternalThreadLocalMap.get();
         ByteBuffer[] nioBuffers = NIO_BUFFERS.get(threadLocalMap);
         Entry entry = flushedEntry;
@@ -654,6 +661,7 @@ public final class ChannelOutboundBuffer {
             final int newValue = oldValue | 1;
             if (UNWRITABLE_UPDATER.compareAndSet(this, oldValue, newValue)) {
                 if (oldValue == 0) {
+                    // 给所有的outboundBuffer中的channel都触发一个writabilityChanged事件,通知不可写
                     fireChannelWritabilityChanged(invokeLater);
                 }
                 break;

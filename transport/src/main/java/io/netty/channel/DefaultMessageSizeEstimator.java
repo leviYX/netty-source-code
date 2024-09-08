@@ -43,6 +43,7 @@ public final class DefaultMessageSizeEstimator implements MessageSizeEstimator {
                 return ((ByteBufHolder) msg).content().readableBytes();
             }
             // FileRegion的内存占用是堆外的，所以这里返回0，不做计算，我们这个方法计算的堆的缓冲区大小
+            // FileRegion是0拷贝
             if (msg instanceof FileRegion) {
                 return 0;
             }

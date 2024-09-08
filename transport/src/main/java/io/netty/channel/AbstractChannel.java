@@ -866,7 +866,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
 
         // 这是writeAndFlush的底层实现,这个msg就是bytebuf或者FileRegion，netty最后输出的在他的层面就是这个玩意
         // FileRegion是netty用来做大文件处理的，人家优化了。而且你要是btyebuf是不是直接内存，他是要用直接内存的，你就算不是他也给你转
-        // 因为可以减少一次拷贝
+        // 因为可以减少一次拷贝，回头测一下FileRegion，这里是unsafe的write操作，nettty底层都是依赖unsafe的
         @Override
         public final void write(Object msg, ChannelPromise promise) {
             assertEventLoop();
@@ -895,8 +895,8 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
                 /**
                  * 计算要传输写出数据的大小，因为他不会直接就把数据写出去，而是先放到一个缓冲区中channleOutboundBuffer
                  * 发出去是flush才发出去，光write是不发出去的，所以需要计算出要写出的数据大小，为了防止消息的积累，避免大量数据堆积在内存缓冲区
-                 * 这里设置了高低水位线，如果写的数据过多了，超过了高水位线，则触发flush，并且停止写入，避免内存溢出，每次写这个缓冲区的时候，
-                 * 都会做累加计算，和高水位线做对比
+                 * 这里设置了高低水位线，如果写的数据过多了，超过了高水位线，则触发flush，并且停止写入缓冲区，避免内存溢出，每次写这个缓冲区的时候，
+                 * 都会做累加计算看看写了缓冲区多少了和高水位线做对比
                  * 这个size的实现默认位于：io.netty.channel.DefaultMessageSizeEstimator.HandleImpl#size(java.lang.Object)
                  *
                  */
@@ -912,7 +912,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
                 }
                 return;
             }
-            // 添加到缓冲区中，如果超过了高水位线，则触发flush，他不会直接写的，会先写入buffer缓冲区里面
+            // 添加到缓冲区中，如果超过了高水位线，则触发flush，他不会直接写的，会先写入buffer缓冲区里面，里面设计很好，可以看看
             outboundBuffer.addMessage(msg, size, promise);
         }
 
@@ -934,7 +934,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
 
         @SuppressWarnings("deprecation")
         protected void flush0() {
-            // 只处理一次的校验
+            // 只处理一次的校验 only flush once
             if (inFlush0) {
                 // Avoid re-entrance
                 return;
