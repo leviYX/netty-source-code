@@ -34,6 +34,7 @@ public interface Timer {
      * @throws IllegalStateException       if this timer has been {@linkplain #stop() stopped} already
      * @throws RejectedExecutionException if the pending timeouts are too many and creating new timeout
      *                                    can cause instability in the system.
+     *                                    Timeout的作用就是创建一个定时任务TimerTask，delay就是你这个任务的时间
      */
     Timeout newTimeout(TimerTask task, long delay, TimeUnit unit);
 

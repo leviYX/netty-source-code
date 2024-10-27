@@ -276,9 +276,13 @@ public class HashedWheelTimer implements Timer {
      * @throws IllegalArgumentException if either of {@code tickDuration} and {@code ticksPerWheel} is &lt;= 0
      */
     public HashedWheelTimer(
-            ThreadFactory threadFactory,
-            long tickDuration, TimeUnit unit, int ticksPerWheel, boolean leakDetection,
-            long maxPendingTimeouts, Executor taskExecutor) {
+            ThreadFactory threadFactory, // 线程工厂
+            long tickDuration, // 时间轮的执行是定时取轮子上的任务，这就是哪个定时时间，默认100ms
+            TimeUnit unit,  // 定时的时间单位
+            int ticksPerWheel, // 时间轮的长度，默认是512，会统一给你封装为2的n次方
+            boolean leakDetection,
+            long maxPendingTimeouts,
+            Executor taskExecutor) {
 
         checkNotNull(threadFactory, "threadFactory");
         checkNotNull(unit, "unit");
@@ -287,19 +291,24 @@ public class HashedWheelTimer implements Timer {
         this.taskExecutor = checkNotNull(taskExecutor, "taskExecutor");
 
         // Normalize ticksPerWheel to power of two and initialize the wheel.
+        // 创建hash轮，根据你传人的长度来创建，如果不是2的n次方，他会向上取最近的2的n次方，为了hash运算做位运算取代取模
+        // 这个创建出来，其实就是填充了一个HashedWheelBucket的数组，每个格子里面是一个HashedWheelBucket的链表
+        // 这个数组的长度是2的n次方，值是ticksPerWheel向上取2的n次方的最小值
         wheel = createWheel(ticksPerWheel);
+        // 数组的长度-1，这个mask是用来做取模用的,2的n次方-1，位运算替代取模用的
         mask = wheel.length - 1;
 
-        // Convert tickDuration to nanos.
+        // Convert tickDuration to nanos. 定时时间转为了纳秒，内部统一转换单位
         long duration = unit.toNanos(tickDuration);
 
-        // Prevent overflow.
+        // Prevent overflow. 防止溢出，校验了一下长度，这个时间间隔不能太长
         if (duration >= Long.MAX_VALUE / wheel.length) {
             throw new IllegalArgumentException(String.format(
                     "tickDuration: %d (expected: 0 < tickDuration in nanos < %d",
                     tickDuration, Long.MAX_VALUE / wheel.length));
         }
 
+        // 扫描间隔也不能太短，不能小于1ms
         if (duration < MILLISECOND_NANOS) {
             logger.warn("Configured tickDuration {} smaller than {}, using 1ms.",
                         tickDuration, MILLISECOND_NANOS);
@@ -308,12 +317,22 @@ public class HashedWheelTimer implements Timer {
             this.tickDuration = duration;
         }
 
+        // 这个扫描轮上的任务是一个线程跑的，这就是哪个worker线程
         workerThread = threadFactory.newThread(worker);
 
+        // 线程泄露检测是否开启，如果你配置了开启true，那么就开启
+        // 如果你配置了不开启，那么就要看这个worker线程是不是守护线程，如果不是守护线程，那么就开启检测这个线程
         leak = leakDetection || !workerThread.isDaemon() ? leakDetector.track(this) : null;
 
+        // worker扫描任务，在当前任务上话费的最大时间，避免他一直卡在一个任务，轮子后面的任务就得不到执行
         this.maxPendingTimeouts = maxPendingTimeouts;
 
+        /**
+         * 每当你创建一个hashedWheelTimer，那么就会创建一个实例，这个计数器记录有多少个实例。如果你在项目中创建超过了
+         * 默认值INSTANCE_COUNT_LIMIT(64)，并且WARNED_TOO_MANY_INSTANCES从false变为true，那么就会执行reportTooManyInstances
+         * 打印一个警告信息，告诉你创建的实例太多了。其实就是建议你别搞太多，负载会拉高影响你的程序运行。这个值默认是64，你可以通过
+         * SystemProperty.java中设置这个值，比如-Dio.netty.hashedWheelTimerWarnTooManyInstances=false
+         */
         if (INSTANCE_COUNTER.incrementAndGet() > INSTANCE_COUNT_LIMIT &&
             WARNED_TOO_MANY_INSTANCES.compareAndSet(false, true)) {
             reportTooManyInstances();
@@ -351,6 +370,8 @@ public class HashedWheelTimer implements Timer {
      *                               {@linkplain #stop() stopped} already
      */
     public void start() {
+        // 看我worker线程的状态，如果是初始状态，那么就执行compareAndSet方法，如果成功，那么就启动worker线程
+        // 其他状态的话如果起来了就不执行，如果关闭了，就直接抛异常，保证我线程只启动一次，一个时间轮就一个worker线程
         switch (WORKER_STATE_UPDATER.get(this)) {
             case WORKER_STATE_INIT:
                 if (WORKER_STATE_UPDATER.compareAndSet(this, WORKER_STATE_INIT, WORKER_STATE_STARTED)) {
@@ -366,6 +387,17 @@ public class HashedWheelTimer implements Timer {
         }
 
         // Wait until the startTime is initialized by the worker.
+        /**
+         * 上面只是修改了worker的状态，下面这里是不断的轮训，woeker没创建好得的时候会startTimeInitialized.countDown();
+         * 而且startTime是0，此时这里会阻塞在startTimeInitialized.await();等worker创建好
+         * 等worker创建那边创建好了，他那边是这样的
+         * 首先他会给startTime赋值，保证这个值不是0，
+         * 其次他会执行startTimeInitialized.countDown();
+         * 那么此时这里的startTimeInitialized.await();阻塞就会放行下去，然后while循环也会结束。此时就能保证，你在执行
+         * start开始处理任务的时候，我的worker线程已经创建好了，那么就可以执行任务了,他做了一个简单的同步等待。
+         * 不然我那边还美好呢，你这就开始跑了，必然出问题。
+         */
+
         while (startTime == 0) {
             try {
                 startTimeInitialized.await();
@@ -426,26 +458,43 @@ public class HashedWheelTimer implements Timer {
         checkNotNull(task, "task");
         checkNotNull(unit, "unit");
 
+        // 添加任务之后，先加一，统计当前有多少个等待执行的任务
         long pendingTimeoutsCount = pendingTimeouts.incrementAndGet();
 
+        // 如果超了设置的最大任务数，
         if (maxPendingTimeouts > 0 && pendingTimeoutsCount > maxPendingTimeouts) {
+            // 减一，再抛出异常，避免任务太多，这个任务被抛弃
             pendingTimeouts.decrementAndGet();
             throw new RejectedExecutionException("Number of pending timeouts ("
                 + pendingTimeoutsCount + ") is greater than or equal to maximum allowed pending "
                 + "timeouts (" + maxPendingTimeouts + ")");
         }
 
+        // 启动worker线程，开始扫描轮盘，内部有同步的实现
         start();
 
         // Add the timeout to the timeout queue which will be processed on the next tick.
         // During processing all the queued HashedWheelTimeouts will be added to the correct HashedWheelBucket.
+        // 计算出任务执行的时间，就是当前时间加上这个任务设置的延迟时间，减去这个任务创建的时间，就是基于这个任务创建的时间之后多久开始执行
         long deadline = System.nanoTime() + unit.toNanos(delay) - startTime;
 
-        // Guard against overflow.
+        // Guard against overflow. 这就是那种其实已经超时了的时间，错过了，就永远不执行了
+        // 超时指的就是，在我时间轮的worker还没创建好呢，你就提交了任务，这种不执行
+        /**
+         * 这里避免的是用户瞎jb设置了一个很大的延迟时间，比如long.max_value，此时你执行System.nanoTime() + unit.toNanos(delay) - startTime;
+         * 返回的数会超出long的表达范围发生溢出，是个负数了，这时候就给他弄个合法的正数，那就最大得了
+         */
         if (delay > 0 && deadline < 0) {
             deadline = Long.MAX_VALUE;
         }
+
+        // 此时把你的任务封装好，这才是netty时间轮要处理的对象，只是基于你的一些参数构造了一下，给netty用
         HashedWheelTimeout timeout = new HashedWheelTimeout(this, task, deadline);
+        // 把任务添加到时间轮的任务队列中，worker线程会处理这个任务,按照轮的思想
+        // 而且Mpsc是一个无锁队列，高性能，他的全称是multiple producer single consumer queue
+        // 多生产者单消费者队列，就是说，一个队列，多个线程往里面添加数据，一个线程从里面取数据，但是不加锁保证性能和并发安全，优秀的很
+        // 因为你一个时间轮可能有多个线程在往里面提交任务。
+        // 此时任务已经被放入队列，其余的逻辑就落到了worker线程如何消费这个队列了。
         timeouts.add(timeout);
         return timeout;
     }
