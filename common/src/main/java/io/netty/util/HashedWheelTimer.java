@@ -375,6 +375,7 @@ public class HashedWheelTimer implements Timer {
         switch (WORKER_STATE_UPDATER.get(this)) {
             case WORKER_STATE_INIT:
                 if (WORKER_STATE_UPDATER.compareAndSet(this, WORKER_STATE_INIT, WORKER_STATE_STARTED)) {
+                    // 执行run方法
                     workerThread.start();
                 }
                 break;
@@ -461,7 +462,7 @@ public class HashedWheelTimer implements Timer {
         // 添加任务之后，先加一，统计当前有多少个等待执行的任务
         long pendingTimeoutsCount = pendingTimeouts.incrementAndGet();
 
-        // 如果超了设置的最大任务数，
+        // 如果超了设置的一个时间轮上的最大任务数，maxPendingTimeouts默认是-1表示不限制，你可以配置。
         if (maxPendingTimeouts > 0 && pendingTimeoutsCount > maxPendingTimeouts) {
             // 减一，再抛出异常，避免任务太多，这个任务被抛弃
             pendingTimeouts.decrementAndGet();
@@ -476,6 +477,8 @@ public class HashedWheelTimer implements Timer {
         // Add the timeout to the timeout queue which will be processed on the next tick.
         // During processing all the queued HashedWheelTimeouts will be added to the correct HashedWheelBucket.
         // 计算出任务执行的时间，就是当前时间加上这个任务设置的延迟时间，减去这个任务创建的时间，就是基于这个任务创建的时间之后多久开始执行
+        // startTime是worker启动的时间，所以他都要减去，从你任务创建的时间开始计算，就是基于你任务创建的时间之后多久开始执行
+        // 因为基于毫秒来看，这些时间还是很大的不能忽略。
         long deadline = System.nanoTime() + unit.toNanos(delay) - startTime;
 
         // Guard against overflow. 这就是那种其实已经超时了的时间，错过了，就永远不执行了
@@ -494,7 +497,8 @@ public class HashedWheelTimer implements Timer {
         // 而且Mpsc是一个无锁队列，高性能，他的全称是multiple producer single consumer queue
         // 多生产者单消费者队列，就是说，一个队列，多个线程往里面添加数据，一个线程从里面取数据，但是不加锁保证性能和并发安全，优秀的很
         // 因为你一个时间轮可能有多个线程在往里面提交任务。
-        // 此时任务已经被放入队列，其余的逻辑就落到了worker线程如何消费这个队列了。
+        // 此时任务已经被放入队列，其余的逻辑就落到了worker线程如何消费这个队列了。他给任务和调度任务不在一起，因为当前这个任务可能不调度，
+        // 他是先给到队列里面，然后做处理，然后放到时间轮上，然后执行
         timeouts.add(timeout);
         return timeout;
     }
@@ -533,14 +537,31 @@ public class HashedWheelTimer implements Timer {
             startTimeInitialized.countDown();
 
             do {
+                /**
+                 * 他是整点运行的，比如你设置的是100ms，拿他就是100ms 200ms这种执行。所以这里就是当他执行完了还不到整点
+                 * 那他就睡眠阻塞，避免空转
+                 * 这个方法的逻辑就是计算当前时间距离下一次执行格子的整点时间，还有多久，如果还有时间就睡眠。返回的是个正数
+                 * 如果到了或者超了就立刻返回(是个负数)，不睡了。
+                 */
                 final long deadline = waitForNextTick();
                 if (deadline > 0) {
+                    /**
+                     * tick就是你当前走到的时间轮子上的格数，第几个格子
+                     * mask就是时间轮的格子数减去1，而格子数是2的n次方，所以tick & mask = tick % wheel.length -1
+                     * 而和2的n次方-1做与运算，等于和这个2的n次方数做取余运算。所以这里其实就是再算当前的这个格子，位于轮子上的
+                     * 哪个位置，他用的是取摸运算。
+                     */
                     int idx = (int) (tick & mask);
+                    // 处理那些取消的任务，任务可以取消的哈
                     processCancelledTasks();
-                    HashedWheelBucket bucket =
-                            wheel[idx];
+                    // 处理要执行的格子上面的任务链表
+                    HashedWheelBucket bucket = wheel[idx];
+                    // 之前我们吧任务放在了队列中，这里我们要取出来队列任务，放到链表中，放入轮子里面了，执行这个轮子。这里是轮的重心逻辑
+                    // 注意这里只是放入轮子，从队列取出来放入轮子，不是真正执行，只是放入轮子而已
                     transferTimeoutsToBuckets();
+                    // 开始执行任务
                     bucket.expireTimeouts(deadline);
+                    // 格子+1，往下转动
                     tick++;
                 }
             } while (WORKER_STATE_UPDATER.get(HashedWheelTimer.this) == WORKER_STATE_STARTED);
@@ -563,21 +584,31 @@ public class HashedWheelTimer implements Timer {
 
         private void transferTimeoutsToBuckets() {
             // transfer only max. 100000 timeouts per tick to prevent a thread to stale the workerThread when it just
-            // adds new timeouts in a loop.
+            // adds new timeouts in a loop. 循环十万次，其实就是从当前这个格子上取出十万个任务。注意这个数字固定了，所以他不是一次取完，
+            // 因为你完全可以放十万个更多的。这里他不是一次取完，不然消耗太大了。他分批了。
             for (int i = 0; i < 100000; i++) {
+                // 获取下一个任务
                 HashedWheelTimeout timeout = timeouts.poll();
+                // 为空说明处理完了，直接退出
                 if (timeout == null) {
                     // all processed
                     break;
                 }
+                // 如果这个任务被取消了，跳过
                 if (timeout.state() == HashedWheelTimeout.ST_CANCELLED) {
                     // Was cancelled in the meantime.
                     continue;
                 }
 
+                // 下面就是计算这个任务该放到哪个格子上，包括他是哪个轮次的，因为他可能转一圈才执行或者转几圈才执行
                 long calculated = timeout.deadline / tickDuration;
                 timeout.remainingRounds = (calculated - tick) / wheel.length;
 
+                // 确认下一轮的任务也不会被丢掉，他确认你下一轮或者下几轮的不在本次执行，放入下一回
+                // tick大于calculated的时候说明过期了，当任务很多，并且延迟很短的时候，没来得及从队列取出来就过期了
+                // 因为每次都取10万个，可能好几次都取不到，但是tick还在自增，所以此时他可能已经过期了
+                // 此时他就再也回不去执行哪个任务的tick了，所以他选择把你这个过期任务放到当前的格子里面了
+                // 即便你可能属于第3个tick，但是加入此时到了第四个tick，那我会把你放到这里执行，虽然已经超了
                 final long ticks = Math.max(calculated, tick); // Ensure we don't schedule for past.
                 int stopIndex = (int) (ticks & mask);
 
@@ -610,12 +641,56 @@ public class HashedWheelTimer implements Timer {
          * current time otherwise (with Long.MIN_VALUE changed by +1)
          */
         private long waitForNextTick() {
+            // tickDuration是我设置的我的设置的轮子上的格子代表的时间长度，这里计算的就是下一个格子执行的时间
             long deadline = tickDuration * (tick + 1);
 
             for (;;) {
+                /**
+                 * startTime是我们worker启动的时间
+                 * 而任务提交进去那一刻开始人家就开始算这个任务的执行延迟时间了，这里不管你线程启动的消耗，所以要抛去这个线程启动的消耗
+                 * 当前时间减去启动时间，就是我这个任务从提交到运行到这里的时间
+                 */
                 final long currentTime = System.nanoTime() - startTime;
+                /**
+                 * deadline是我这个任务要执行的时间，也就是我提交的时候指定的哪个延迟时间
+                 * 而注意此时已经各种消耗线程创建，代码运行到这里已经消耗了时间了。经过消耗之后这个任务执行的延迟时间
+                 * 我们上面已经计算出来为currentTime，那其实我任务还剩的执行时间就是deadline - currentTime
+                 * 这个时间就是我要执行我的延迟任务还剩的时间，这个时间到现在还是纳秒。所以他除以了1000000变为了毫秒
+                 * 那么为什么要+999999，因为他怕你这个时间太短，不然下面睡的时间太短了，资源消耗
+                 * 因为这里要除1000000，而根据乘法分配律，你这里其实等于多加了1ms这个开销是可以接受的
+                 * 这里我举个例子吧：
+                 HashedWheelTimer timer = new HashedWheelTimer(1, TimeUnit.SECONDS,20);
+                 timer.newTimeout(new TimerTask(){
+                 @Override
+                 public void run(Timeout timeout) {
+                    System.out.println(" timeout ");
+                 }
+                }, 2, TimeUnit.SECONDS);
+                 上面我创建了一个时间轮盘，其长度为20，但是他会被初始化为向上的2的n次方数，也就是32 我指定的每个格子是1秒。也就是我的
+                 worker线程会每隔着一秒执行一次下一个格子
+                 然后我提交了一个延迟2秒的任务，那么我提交任务的时候是纳秒的，而worker线程启动后开始执行，
+                 那么到了这里long deadline = tickDuration * (tick + 1); 此时tickDuration就是1，tick是0(第一次走，第一个格子)
+                 此时我的任务的格子就是1 * 0 + 1 = 1秒，这个没毛病，我们就是每个格子就是1秒跑一下
+                 然后执行long currentTime = System.nanoTime() - startTime; startTime是线程启动的时间，用当前时间减去线程启动的消耗
+                 时间，也就是算出来线程启动那个时间的时间。
+                 然后我们来到这里deadline就是1秒 1-当前时间+999999  / 1000000  = 0.999999秒，其实也就是个1
+                 此时就算出了距离执行下一个格子还剩多久。注意此时还没开始处理任务呢，只是算一下啥时候执行下一个格子。
+                 他的逻辑就是通过每个格子的时间长度，然后当前时间减去前面的开销，看看这个时间长度还剩多久。而且加了一个0。1ms的偏移量避免太小了
+                 因为他算出这个还剩多久这个剩的时间他要sleep，你要是太小了这个sleep的时间太短了，资源消耗,当你还剩很多的时候这个偏移量其实也起不到啥作用
+                 杯水车薪罢了。所以你能看到他这个又是考虑启动开销，又是考虑偏移量，所以我们知道，netty的时间轮不准，不是那么的无比精确
+                 *
+                 */
                 long sleepTimeMs = (deadline - currentTime + 999999) / 1000000;
 
+                /**
+                 * 或者是你启动消耗很大，此时减去之后是负数，那么这个任务已经过期了。因为你这时候启动了一个格子还大的长度，所以这时候这个格子里面
+                 * 的任务就要立即执行，不用睡了。所以这里要立刻返回。
+                 * 而且还能有负数或者0有一种可能，因为可能上一个任务太长了，超过了一个格子的时间，再次循环到这一轮的时候，就会发生负数，
+                 * ，因为你要注意一点我们这个方法的功能是计算当前距离下一个格子执行的整点时间还有多久。执行完任务就要计算一次。如果距离下一个
+                 * 格子运行时间还有距离，那就睡眠，所以要+一个999999，就怕你太小了，万一小的比1ns还小，那你还sleep个毛线，所以加了一个poch
+                 * 而且睡眠方法最小还是毫秒，这个必须加一下偏移一把
+                 * 那么他就会直接返回，不睡眠了。
+                 */
                 if (sleepTimeMs <= 0) {
                     if (currentTime == Long.MIN_VALUE) {
                         return -Long.MAX_VALUE;
@@ -637,6 +712,7 @@ public class HashedWheelTimer implements Timer {
                 }
 
                 try {
+                    // 睡眠剩余时间，
                     Thread.sleep(sleepTimeMs);
                 } catch (InterruptedException ignored) {
                     if (WORKER_STATE_UPDATER.get(HashedWheelTimer.this) == WORKER_STATE_SHUTDOWN) {
@@ -817,6 +893,7 @@ public class HashedWheelTimer implements Timer {
 
         /**
          * Expire all {@link HashedWheelTimeout}s for the given {@code deadline}.
+         * 调度延迟任务，注意如果任务超时了，还是会执行，所以netty的时间轮任务不准
          */
         public void expireTimeouts(long deadline) {
             HashedWheelTimeout timeout = head;
@@ -824,9 +901,13 @@ public class HashedWheelTimer implements Timer {
             // process all timeouts
             while (timeout != null) {
                 HashedWheelTimeout next = timeout.next;
+                // 只要你的轮次满足，他就会进去
                 if (timeout.remainingRounds <= 0) {
                     next = remove(timeout);
+                    // 如果当前任务应该执行的的执行时间小于当前时间，也就是他超时了，其实也会执行，所以他是小于等于都会执行，
+                    // 等于就是正好，小于就是超了，大于就是还没到呢
                     if (timeout.deadline <= deadline) {
+                        // 任务开始run
                         timeout.expire();
                     } else {
                         // The timeout was placed into a wrong slot. This should never happen.

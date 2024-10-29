@@ -17,7 +17,7 @@ public class TestNettyTimer {
             public void run(Timeout timeout) {
                 System.out.println(" timeout ");
             }
-        }, 50, TimeUnit.SECONDS);
+        }, 2, TimeUnit.SECONDS);
 
 
     }
