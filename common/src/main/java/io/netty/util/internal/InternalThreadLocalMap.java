@@ -110,15 +110,20 @@ public final class InternalThreadLocalMap extends UnpaddedInternalThreadLocalMap
     }
 
     public static InternalThreadLocalMap get() {
+        // 取当前线程
         Thread thread = Thread.currentThread();
+        // 如果你用的FastThreadLocalThread 那就快速处理，意思就是走了他的优化了
         if (thread instanceof FastThreadLocalThread) {
             return fastGet((FastThreadLocalThread) thread);
-        } else {
+        }
+        // 这个分支是jdk的Thread，兼容不是他的那种FastThreadLocalThread
+        else {
             return slowGet();
         }
     }
 
     private static InternalThreadLocalMap fastGet(FastThreadLocalThread thread) {
+        // 直接获取，有就返回，没有就创建一个set进去
         InternalThreadLocalMap threadLocalMap = thread.threadLocalMap();
         if (threadLocalMap == null) {
             thread.setThreadLocalMap(threadLocalMap = new InternalThreadLocalMap());
@@ -127,9 +132,13 @@ public final class InternalThreadLocalMap extends UnpaddedInternalThreadLocalMap
     }
 
     private static InternalThreadLocalMap slowGet() {
+        // 获取的是jdk的ThreadLocalMap
         InternalThreadLocalMap ret = slowThreadLocalMap.get();
         if (ret == null) {
             ret = new InternalThreadLocalMap();
+            // 因为原生的tl不能封装InternalThreadLocalMap，但是这里是为了兼容原生，而且他自己的哪个tl不会冲突
+            // 所以一定要用他那个，
+            // 把InternalThreadLocalMap 放到ThreadLocal中，此时就等于当前线程也拥有了InternalThreadLocalMap
             slowThreadLocalMap.set(ret);
         }
         return ret;

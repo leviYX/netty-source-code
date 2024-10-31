@@ -192,9 +192,11 @@ public class FastThreadLocal<V> {
      */
     public final void set(V value) {
         if (value != InternalThreadLocalMap.UNSET) {
+            // 获取当前线程中的InternalThreadLocalMap
             InternalThreadLocalMap threadLocalMap = InternalThreadLocalMap.get();
             setKnownNotUnset(threadLocalMap, value);
         } else {
+            // 你存的要是默认值object，那你就直接remove掉，因为没必要存了
             remove();
         }
     }

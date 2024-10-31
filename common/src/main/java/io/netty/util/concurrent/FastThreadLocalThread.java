@@ -22,6 +22,7 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
 
 /**
  * A special {@link Thread} that provides fast access to {@link FastThreadLocal} variables.
+ * 重写了一个线程类，用于快速访问InternalThreadLocalMap变量，因为原生的不是InternalThreadLocalMap，所以重写了
  */
 public class FastThreadLocalThread extends Thread {
 
