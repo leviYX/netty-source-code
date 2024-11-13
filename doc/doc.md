@@ -4,6 +4,8 @@
 
 而在java语言中，因为还存在一个gc的问题，会带来stw的开销。于是我们使用内存池还能规避这种问题。
 
+比较著名的内存池是内核中实现的[jemalloc][https://github.com/jemalloc/jemalloc].他的代码其实也还好，后面我们看看，我的c属于起步阶段，不太敢献丑。
+
 ## 1、netty中的内存利用技巧
 
 1、能使用基本类型，就不用包装类型。
@@ -89,7 +91,7 @@ jemalloc:tcmalloc发展而来的优秀实现，把内存做了更加细的划分
 # Netty内存池结构的设计以及相关对象
 
 # 1、PoolArena :netty内存池的内存管理核心，总体的管理者。
-	Netty使用固定数量的多个Arena对象来进行内存的管理分配，他的数量是固定的(和你的cpu核数相关)，每一个线程都有一个PoolArena，但是多个线程之间又可以共享一个PoolArena，所以不会很多，因为能共享。
+	Netty使用固定数量的多个Arena对象来进行内存的管理分配，他的数量是固定的(和你的cpu核数相关)，每一个线程都有一个PoolArena，但是多个线程之间又可以共享一个PoolArena，所以不会很多，因为能共享。默认是cpu * 2。
 
 # 2、结构变量
 	我们知道在netty中他把内存划分为四种规格来分配，分别是tiny small normal huge。其中huge是不会被池化缓存的，所以PoolArena不会管理huge。所以我们不说huge。而在netty中是如何管理其他三种呢。
@@ -97,7 +99,7 @@ jemalloc:tcmalloc发展而来的优秀实现，把内存做了更加细的划分
 	对于small，他有一个变量，smallSubPagePools,这个变量的类型是一个PoolSubPage的数组，private PoolSubPage[] smallSubPagePools
 	对于Chunk，他不是这么管理的，为了更加合理的使用内存，他使用了六个PoolChunkList集合，每个集合都是Chunk的集合。
 	类似于private ArrayList<Chunk> PoolChunkList1  private ArrayList<Chunk> PoolChunkList2 ... private ArrayList<Chunk> PoolChunkList6
-	之所以有六个是存在一个使用率的问题。
+	之所以有六个是存在一个使用率的问题，涉及到冷热划分的概念了。
 ~~~
 
 我们完全可以验证一下。我们来看PoolArena的源码。
@@ -127,7 +129,8 @@ abstract class PoolArena<T> implements PoolArenaMetric {
   
     // ......
 
-    // Number of thread caches backed by this arena. 前面我们说多个线程可以共享一个PoolArena，这个变量就是记录当前这个PoolArena被几个线程共用了
+    // Number of thread caches backed by this arena. 
+    // 前面我们说多个线程可以共享一个PoolArena，这个变量就是记录当前这个PoolArena被几个线程共用了
     final AtomicInteger numThreadCaches = new AtomicInteger();
 }
 ~~~
@@ -176,25 +179,557 @@ abstract class PoolArena<T> implements PoolArenaMetric {
 
 一样的，只不过这个正好是4个，不用填充0，就是2的n次方，可以直接用来做位运算取模。
 
+所以你其实能看出来，虽然我们说page是一个逻辑上的概念，实际上不存在page的实体。但是他的划分的单元就是page，每次都是拿出来一个或者多个page进行分配。小于一个page的就是tiny/small。大于一个page的就是normal，大于16M的就是huge。但是实际上每次划出来的这个page用来分配都是从16M的这个chunck里面分配出来的，而chunck是实打实的有对应的类的。他不会直接找到chunck，他分配是基于page来分配的。但是如果你是tiny或者small的时候，一次给你8K你也用不了，内部碎片还是很大，所以就会按照你的尺寸把一个page再均分好多份，给你一份或者多份，其余的就挂在链表上后面再分配。
+
+如果你不够了，那就再从一个chunck取一个8k，然后封装为一个PoolSubPage，然后再按照那个方式划分。
+
+### 3.3、验证
+
+我们分析了这么多，怎么在代码中验证一下看看是不是这样分配的呢。上面我们说了，每一个Arena都是和线程绑定的。所以我们要看这个结构，我们只需要获取我们当前的线程然后看他内部的threadlocalmap就可以了。而且我们要知道他们内部是缓存在fastthreadlocal里面的，至于ftl是怎么整合j d k原生tl的我们先不说。你只需要知道，ftl是存在tl的internalThreadLocal里面的一个entry里面的就可以了，于是我们来看代码。
+
+~~~java
+public class TestPool {
+    public static void main(String[] args) {
+        // 申请10B
+        ByteBufAllocator.DEFAULT.buffer(10);
+
+        Thread thread = Thread.currentThread();
+        System.out.println(thread.getName());
+    }
+}
+~~~
+
+上面我们申请了10B大小的空间，首先他是一个tiny(16B-496B)。但是他又不足16b，所以一定会被向上取整为16B,然后去tiny数组的第二个格子，也就是index=1的位置去找，第一次肯定是没有的，于是netty肯定会给你申请一个chunk(16M)，从这个chunk中分出一个page大小，包装成PoolSubPage，并且以16B的尺寸切割，为512份，并且分配其中的一份。并且挂在index = 1这个格子后面，成为双向链表的第一个元素。那么此时问题来了，你说是就是啊。那么我们不妨把断点打在上面看看thread的结构就好了。
+
+![image-20241112120632142](doc.assets/image-20241112120632142.png)
+
+我们来看这个thread的结构。
+
+![image-20241112121028335](doc.assets/image-20241112121028335.png)
+
+### 3.4、PoolSubpage
+
+![image-20241112124723021](doc.assets/image-20241112124723021.png)
+
+看着这个图现在我们来思考一个问题，我们分配了一个page之后，比如我们分走了一个小块一份16B，我们把它叫做16b1,那么下次又有人来要空间，这个16b1你肯定不能分给她了吧，毕竟人家已经被使用着了。你再分走怕不是数据就脏了。那么问题来了，怎么知道哪个块被分走了，哪个没有呢。于是引出了下一个结构，位图bitmap。所以我们就要在PoolSubpage这个结构中划分一个位图，来标识PoolSubpage中的小块到底哪个用了哪个没用。
+
+位图结构其实也简单，就是一个数组，每一位表达一个语义。1表示已经分配走了，0表示还没分配。那么是不是我们划分了512个小块，这个数组就是512个长度呢，每一个位表示一个小块。很自然对吧。
+
+但是不好意思，不是，这个bitmap数组长度固定为8，而且不变。
+
+~~~java
+final class PoolSubpage<T> implements PoolSubpageMetric {
+
+    // ******
+    private final long[] bitmap;
+    // ******
+}
+~~~
+
+那就奇怪了，你长度为8，咋表达我这么多小块呢。所以他必然不是每一位就单独表达一个元素。但是他是一个数组，他是一个long类型的数组，我们知道long类型是占据8个字节的，也就是64位。
+
+而这个数组长度就是8，那8个64位，不就是512吗。而我们这个page最大划分的也就是512块(按16B划分)，其余的情况都不够512。所以他是足以表达我们的需求的。他的结构是这样的。
+
+![image-20241112131113224](doc.assets/image-20241112131113224.png)
+
+而此时我们分配了一个小块，那其实就是第一个long的64位的第一位变成了1，其余的都还是0.
+
+![image-20241112131132233](doc.assets/image-20241112131132233.png)
+
+### 3.5、PoolChunkList(normal)
+
+在搞完了tiny/small之后，我们还剩下一个normal规格的内存分配。上面我们看到了，这种规格的分配在六个数组中管理。
+
+~~~java
+private final PoolChunkList<T> q050;
+private final PoolChunkList<T> q025;
+private final PoolChunkList<T> q000;
+private final PoolChunkList<T> qInit;
+private final PoolChunkList<T> q075;
+private final PoolChunkList<T> q100;
+~~~
+
+也就是六个PoolChunkList，每个PoolChunkList里面管理着一组Chunk，一开始我们说了一个Chunk是16MB。
+
+那么为什么是6个数组呢。不能是一个Chunk，或者一个PoolChunkList呢？
+
+#### 3.5.1、一个Chunk
+
+那就是说只有一个16mb的内存块进行分配，你觉得这个行吗，有些场景分分钟给你突破这个数据分配。16mb算个毛线，所以pass。
+
+#### 3.5.2、一个PoolChunkList
+
+既然一个不够，那给多个总行了吧，我们用一个list里面放多个Chunk，这样不够了还能扩容，了不起做成链表。
+
+比如我们有四个。是这样的。
+
+![image-20241112133109366](doc.assets/image-20241112133109366.png)
+
+假如在程序运行中，逐渐经过分配归还，他们现在每个chunk还剩一部分，变成了这样。
+
+![image-20241112133226904](doc.assets/image-20241112133226904.png)
+
+不必惊讶为啥后面的剩的会比前面的多，因为是动态的，有的可能释放了空间。
+
+此时外部要申请一个8M的内存空间，那么就需要遍历，发现第一个不行，第二个不行，第三个不行，直到找到最后一个才发现可以了。那么问题来了，这才四个，要是四百个，四万个呢？这种效率是非常低的。而这种低效率来自于我们不知道哪个chunk是可用的，我们只能遍历去找。所以如果我们能区分开，哪些用完了，哪些还没用呢，哪些用了百分之二十了，这样我们就能很直接的找到我们在哪个里面分配。于是这种也被pass了。
+
+#### 3.5.3、多个PoolChunkList
+
+基于以上的逻辑，我们需要多个chunk的集合。每个集合按照使用率来划分，那我们后面就能直接去哪个集合里面分配了，这样就快多了。至于多个是几个呢。netty用了6个。
+
+他们分别代表不同使用率的chunk的集合。
+
+~~~java
+// 以下六个代表不同使用率的chunk的集合
+private final PoolChunkList<T> qInit; 0-25%
+private final PoolChunkList<T> q000;  1%-50%
+private final PoolChunkList<T> q025;  25%-75%
+private final PoolChunkList<T> q050;  50%-100%
+private final PoolChunkList<T> q075;  75%-100%
+private final PoolChunkList<T> q100;  100%
+~~~
+
+可以看到他不是一个准确值，他是个范围，因为内存是不断的在变化的。你要准确就会一直变，一直计算，而且你还不一定就能计算出那个值，很难把握，没什么意义。反而还会增加负担。
+
+而且即便你是个范围，他的这些个chunk的使用率还是会变，此时他会移动到符合他使用率的PoolChunkList。但是因为是个范围，移动的不会很频繁。
+
+而且因为每个PoolChunkList其实是以双向链表的结构维护的，所以移动的时候只需要把chunk的指针移动到另一个符合PoolChunkList的尾部即可。
+
+而且你可以看到这6个集合的使用率他不是严格划分区间的，他是有区间重合的，这种是为了避免移动频繁。比如一开始你chunk1使用率在26%位于q025。此时他就算涨了40变成了66%，他也不用移动到q050，还在q025中分布即可。他这种模糊了区间，让移动变少。你要是非常精确的划分，那就一旦变了，那就有可能移动了。这样在快速变化的内存分布中会非常的计算频繁，浪费性能。他不需要确切的值，差不多能分配就行。
+
+#### 3.5.4、移动
+
+我们上面说，当某一个PoolChunkList中的chunk的使用率变化的时候，他是会在这些PoolChunkList中移动的，进而来满足他的使用率对应的范围。这个说法对，但是不全对。他的移动是有规则的。我们来看源码。
+
+~~~java
+// 构造函数
+PoolChunkList(PoolArena<T> arena, PoolChunkList<T> nextList, int minUsage, int maxUsage, int chunkSize)
+
+// 初始化
+q100 = new PoolChunkList<T>(this, null, 100, Integer.MAX_VALUE, chunkSize);
+q075 = new PoolChunkList<T>(this, q100, 75, 100, chunkSize);
+q050 = new PoolChunkList<T>(this, q075, 50, 100, chunkSize);
+q025 = new PoolChunkList<T>(this, q050, 25, 75, chunkSize);
+q000 = new PoolChunkList<T>(this, q025, 1, 50, chunkSize);
+qInit = new PoolChunkList<T>(this, q000, Integer.MIN_VALUE, 25, chunkSize);
+
+q100.prevList(q075);
+q075.prevList(q050);
+q050.prevList(q025);
+q025.prevList(q000);
+q000.prevList(null);
+qInit.prevList(qInit);
+~~~
+
+我们看到在初始化这6个PoolChunkList的时候，他的nextList就表示当前PoolChunkList中的chunk能移动的下一个PoolChunkList。
+
+而后面的prevList表达的是他能向前移动的PoolChunkList。于是根据这个代码我们可以绘制出他的移动图。
+
+![image-20241112153439223](doc.assets/image-20241112153439223.png)
+
+这样你能看出来，他的移动不是随便就能移动的，他有自己的移动方向，比如当前有一个chunk使用率为100，此时他位于q100。然后他释放了40的使用率，此时他的使用率变成了60。按道理说此时他应该满足了q050。但是，他不能移动去q050，因为不满足移动规则，他只能去q075，然后再由q075移动到q050。
+
+而且你还看到100不能移动去init，而且其他的都不能移动去init,那我有一个chunk要是都归还了内存，现在就是0，你让我去哪里。对不起，此时这种chunk，直接归还os，直接原地释放。使用率为0的除了init本地出产的其余都会还给os。但是一般情况下，他不是直接干到0，他是慢慢降，往回走，直到q000的时候就归还了。我们现在说的都是堆外，所以他是归还os，如果是堆就是归还堆。
+
+而且你也其实能看出来，每一个chunk一开始创建出来，是在qinit中被创建出来，其实你看名字也能看个差不多。
+
+而且qinit中使用率为0的不会释放资源，为0也还能用(从25释放到0也不会释放)。但是q000中为0的是会归还的。
+
+其次在q000中也会有百分之0的情况，1、在q000中释放没了，2、从上面退下来的为0的。这两种都会被归还。
+
+**源码：**
+
+关于移动，我们来看看他的源码内容来印证一些我们的猜测。
+
+我们要看的就是io.netty.buffer.PoolChunkList这个类。
+
+我们先来看他的构造函数：
+
+~~~java
+final class PoolChunkList<T> implements PoolChunkListMetric {
+    private static final Iterator<PoolChunkMetric> EMPTY_METRICS = Collections.<PoolChunkMetric>emptyList().iterator();
+  	// PoolChunkList所属的PoolArena
+    private final PoolArena<T> arena;
+  	// 后置PoolChunkList
+    private final PoolChunkList<T> nextList;
+  	// 当前PoolChunkList的最小占用空间，一旦那个chunk的占用低于了这个值，就发生移动，每个PoolChunkList的最小值不一样
+  	// 比如q000：1%-50%。一个chunk大小为16M,那么他的minUsage就是1，对应的max也是一样的，都有自己的值，一旦大于最大值，也会移动
+  	// 这个值是在初始化这六个PoolChunkList的时候写死的。
+    private final int minUsage;
+    private final int maxUsage;
+  	// PoolChunkList这个双向链表的长度
+    private final int maxCapacity;
+  	// 双向链表的头节点
+    private PoolChunk<T> head;
+
+    // 前置PoolChunkList
+    private PoolChunkList<T> prevList;
+
+  	// 构造函数
+    PoolChunkList(PoolArena<T> arena, PoolChunkList<T> nextList, int minUsage, int maxUsage, int chunkSize) {
+        assert minUsage <= maxUsage;
+        this.arena = arena;
+        this.nextList = nextList;
+        this.minUsage = minUsage;
+        this.maxUsage = maxUsage;
+        maxCapacity = calculateMaxCapacity(minUsage, chunkSize);
+    }
+
+		// 为当前的PoolChunkList添加他的上移PoolChunkList
+    void prevList(PoolChunkList<T> prevList) {
+        assert this.prevList == null;
+        this.prevList = prevList;
+    }
+}
+~~~
+
+在看到了构造函数之后，我们来看他在arena中初始化这六个PoolChunkList的设计。因为我们主打关注移动，所以我们看一看他的前置PoolChunkList和后置PoolChunkList以及min和max即可。
+
+~~~java
+q100 = new PoolChunkList<T>(this, null, 100, Integer.MAX_VALUE, chunkSize);
+q075 = new PoolChunkList<T>(this, q100, 75, 100, chunkSize);
+q050 = new PoolChunkList<T>(this, q075, 50, 100, chunkSize);
+q025 = new PoolChunkList<T>(this, q050, 25, 75, chunkSize);
+q000 = new PoolChunkList<T>(this, q025, 1, 50, chunkSize);
+qInit = new PoolChunkList<T>(this, q000, Integer.MIN_VALUE, 25, chunkSize);
+
+q100.prevList(q075);
+q075.prevList(q050);
+q050.prevList(q025);
+q025.prevList(q000);
+q000.prevList(null);
+qInit.prevList(qInit);
+~~~
+
+好了，我们只是记住，后面我们会回来看的。这里有大用。
+
+关于移动主要发生在io.netty.buffer.PoolChunkList#free中，我们来看，
+
+~~~java
+boolean free(PoolChunk<T> chunk, long handle, ByteBuffer nioBuffer) {
+  	/**
+  		当前chunk的使用小于了最小值了，那就要发生移动了。我们知道chunk是位于PoolChunkList这个双向链表的。自然移动就是链表的移动。
+  		自然就是leetcode上哪些关于链表移除的操作，先摘除，在添加到新的链表中。
+  	*/
+    if (chunk.usage() < minUsage) {
+      	// 这里就是从当前链表摘除，没啥说的，一些固有实现，掰扯一下就看懂了
+        remove(chunk);
+        // Move the PoolChunk down the PoolChunkList linked-list.
+      	// 这里是把这个chunk添加到下一个PoolChunkList中
+        return move0(chunk);
+    }
+    return true;
+}
+~~~
+
+所以我们来看move0(chunk)：
+
+~~~java
+private boolean move0(PoolChunk<T> chunk) {
+  	/**
+  		当前置的PoolChunkList为空，那什么时候会发生这种呢，我们前面说过了q000的前置是空的，并且他的
+  		min和max分别是1, 50。
+  	*/
+    if (prevList == null) {
+       /**
+      	There is no previous PoolChunkList so return false which result in having the PoolChunk destroyed and
+      	all memory associated with the PoolChunk will be released.
+      	此时你已经位于q000了，并且你的占用量是0，直接返回false，当你返回false的时候，你要清楚我们这个调用点最开始是在
+      	io.netty.buffer.PoolArena#freeChunk。这里看到你返回false，最后会调用io.netty.buffer.PoolArena#destroyChunk
+      	这个方法会直接把这个PoolChunk销毁，不会再池化了。所以我们得到结论1:当一个PoolChunk在q000的时候，他如果没有用量，会被销毁。
+       */
+        assert chunk.usage() == 0;
+        return false;
+    }
+  	// 而走到这里说明你不是q000，因为你存在前置PoolChunkList
+    return prevList.move(chunk);
+}
+~~~
+
+那么我们来看prevList.move(chunk);io.netty.buffer.PoolChunkList#move
+
+~~~java
+private boolean move(PoolChunk<T> chunk) {
+    assert chunk.usage() < maxUsage;
+		/**
+    	这是个递归，如果你移动到了下一个PoolChunkList依然超出了当前PoolChunkList的范围，那就继续移动。
+    	所以我们得到结论2:当你的chunk在六个PoolChunkList上移动的时候，他会沿着移动链路一直移动到最后符合条件的PoolChunkList
+    */
+    if (chunk.usage() < minUsage) {
+        // Move the PoolChunk down the PoolChunkList linked-list.
+        return move0(chunk);
+    }
+
+    // PoolChunk fits into this PoolChunkList, adding it here.
+  	// 来到这里就是跳出递归了，说明符合当前PoolChunkList的范围了，那就添加进去，添加也没啥说的，就是一个节点如何进入双向链表，
+  	// 什么？看不懂，求求你刷刷算法吧
+    add0(chunk);
+    return true;
+}
+~~~
+
+但是我们上面说，我们在init中初始化出来的chunk即便是0也不会销毁，这个点我们并没有看到。那么我们咋验证一下呢，我们先来看init的初始化代码。
+
+~~~java
+qInit = new PoolChunkList<T>(this, q000, Integer.MIN_VALUE, 25, chunkSize);
+qInit.prevList(qInit);
+~~~
+
+首先他的后置是q000，前置就是自己。关键点在于最小值，她是integer的最小值。当我们的chunk在移动链路上移动的时候，上面我们看到他会执行chunk.usage() < minUsage这个递归条件，然后移动出去请问你的占用量要如何小于minusage=Integer.MIN_VALUE这个最小值呢。你作为一个整数，永远不可能小于最小的整数。就像你永远不会比你儿子岁数小一样。所以他必然跳过这个if分支，他会直接执行add0(chunk);这个就是发生移动，而不是销毁。因为你走不到move0，所以不会给io.netty.buffer.PoolArena#destroyChunk返回false，自然不会被销毁。
+
+所以这就保证了这个点。
+
+**所以我们得到结论3:在init中初始化出来的chunk即便是0也不会销毁。**
+
+所以最终我们得到三个结论：
+
+~~~markdown
+# 1、当一个PoolChunk在q000的时候，他如果没有用量，会被销毁。
+# 2、当你的chunk在六个PoolChunkList上移动的时候，他会沿着移动链路一直移动到最后符合条件的PoolChunkList。
+# 3、在init中初始化出来的chunk即便是0也不会销毁。他会被使用，即便他开始是0，后面变成12，后面又变成0，他也不会被销毁，这里是他的安全区，因为你永远不可能比int的最小值小(你懂的)。
+~~~
+
+对应的max的升级其实也是一样的。
+
+#### 3.5.5、Chunk的创建
+
+那么什么时候会创建Chunk呢，自然就是我们需要申请的时候。既然是申请那就找到arena中的io.netty.buffer.PoolArena#allocate(io.netty.buffer.PoolThreadCache, io.netty.buffer.PooledByteBuf<T>, int)方法
+
+~~~java
+private void allocate(PoolThreadCache cache, PooledByteBuf<T> buf, final int reqCapacity) {
+    final int normCapacity = normalizeCapacity(reqCapacity);
+    if (isTinyOrSmall(normCapacity)) { // capacity < pageSize
+        // 直接看allocateNormal，因为只有normal才会涉及chunk，先不要抬杠，可能tiny/small不够的时候也没有page的时候也要chunk，我们刚开始看，先看这里。不要考虑太极端的case
+        synchronized (this) {
+            allocateNormal(buf, reqCapacity, normCapacity);
+        }
+
+    }
+
+}
+~~~
+
+于是我们来看allocateNormal
+
+~~~java
+private void allocateNormal(PooledByteBuf<T> buf, int reqCapacity, int normCapacity) {
+  	/**
+  		首先我们看到，他不是立马就先创建，他会先去这六个集合里面去找，找到了就返回，不是立刻返回。
+  		但是你可能会问，为啥我50都没找到，还去75找，因为这个是动态变化的，可能你50没找到，后面我75突然就有了呢，double check
+  	*/
+    if (q050.allocate(buf, reqCapacity, normCapacity) || q025.allocate(buf, reqCapacity, normCapacity) ||
+        q000.allocate(buf, reqCapacity, normCapacity) || qInit.allocate(buf, reqCapacity, normCapacity) ||
+        q075.allocate(buf, reqCapacity, normCapacity)) {
+        return;
+    }
+
+    // Add a new chunk. 上面都没找到，来这里newChunk创建一个新的出来
+    PoolChunk<T> c = newChunk(pageSize, maxOrder, pageShifts, chunkSize);
+    boolean success = c.allocate(buf, reqCapacity, normCapacity);
+    assert success;
+  	// 创建之后，添加到init，正式出生。后面随着他的使用会慢慢升级可能去q100，当然中间也可能随着内存的释放会被降级，但是永远不会再回到init了
+  	// 最后的归属就是q000，这个前面我们说了。三个结论可以论证这个观点。
+    qInit.add(c);
+}
+~~~
+
+### 3.6、PoolChunk
+
+#### 3.6.1、结构所在
+
+其实到了这里，我们对于这个概念已经不陌生了，因为我们已经知道。
+
+PoolChunk有如下特性：
+
+~~~markdown
+# 1、是netty申请内存的最小单位16MB
+# 2、出生在qinit集合中
+# 3、被划分为2048个page，每个page是8K,当我们申请一个9k的大小的时候，他会按照8k 16k 32k 64K这样的规格去查找，所以他会给你分配一个16k的，也就是两个page
+~~~
+
+那么我们要面对的一个问题就是，她是如何对page做管理的，当我们分配内存的时候，他给我们到底分配哪个page呢？
+
+而他管理的方式就是伙伴算法，这个算法在内核中也是有涉及的，因为就是[jemalloc](https://github.com/jemalloc/jemalloc)算法的翻版。
+
+而他的数据结构，正是一个满二叉树(*一个二叉树,如果每一层的结点数都达到最大值,则这个二叉树就是满二叉树*。)。不信的话你去看看他这个类的注释。
+
+io.netty.buffer.PoolChunk。我把注释粘贴下来了一部分，我们看看这个满二叉树的结构到底是啥。
+
+~~~markdown
+* depth=0        1 node (chunkSize)
+* depth=1        2 nodes (chunkSize/2)
+* ..
+* ..
+* depth=d        2^d nodes (chunkSize/2^d)
+* ..
+* depth=maxOrder 2^maxOrder nodes (chunkSize/2^{maxOrder} = pageSize)
+* depth=maxOrder is the last level and the leafs consist of pages
+~~~
+
+你可以看到，第一层也就是根节点，其实是chunksize，其实就是16M
+
+每往后都分二叉，然后处以2，得到下一层，最后一层的叶子结点的大小是pagesize，其实就是8K。
+
+这个树非常的大，我就不画了，要命。但是她是满二叉树，其实是等比数列，我们可以知道，他一共是11层。而且叶子结点一共是2048个。也就是2048个8K。于是此时你就能明白，这颗树上的所有节点，其实就包括了8K-16M期间所有的2的n次方的规格。
+
+![image-20241112172653818](doc.assets/image-20241112172653818.png)
+
+那么他是如何管理这个树的呢，这个树又如何和内存分配管理搭边呢。首先你要明白，树是逻辑结构，内存中并不存在树这个结构。就像内存里面没有环一样，你可以用数组去模拟环。
+
+这里底层用的是数组来实现的树。
+
+~~~JAVA
+final class PoolChunk<T> implements PoolChunkMetric {
+
+    // 这就是那两个数组，完成的树
+    private final byte[] memoryMap;
+    private final byte[] depthMap;
+}
+~~~
+
+那么数组怎么实现树呢，这是个值得讨论的问题，我们知道数组其实就两个因素，一个是下标，一个是该下标存储的值。那么他还是个满二叉树。那么我们就可以从左到右遍历这颗树，为每个节点编号，按照顺序把编号作为数组的下标，把节点上的值作为数组的值，存进去，那么这样就保存在了数组上。
+
+所以16MB对应的下标就是1，两个8M分别是2，3，然后水平遍历一直给他分一个下标号。最后一层是2048到4095，这个其实不难，等比数列。一共是2048个叶子结点，因为16m就能划2048个page。他最终分配是按照叶子结点去分配的。
+
+倒数第二层的16K那一层就是1024-2047。而数组的value存的就是他的层数(从0开始)。注意是层数，不是那个什么2Mb,3Kb啥的。没有大小的概念，他存的层数。
+
+当我们初始化PoolChunk的时候，memoryMap和depthMap初始化一摸一样，就是那个满二叉树，编号是下标，value存层数。那么我们有了memoryMap为啥还要depthMap呢，他是作为辅助存储的，因为后面我们逐渐分配的时候memoryMap会慢慢变，那我们需要一个我输入下标直接获取层数的地方，他就是做这个的。因为初始化他存储了，下标和层高的数据，所以他depthMap[index]就能取出里面存的层高。所以其实depthMap永远不变，他就是个参考，一个字典。不如叫他dictMap得了。
+
+但是memoryMap是会变化的，他根据我们的节点的空间分配的过程，这个memoryMap的value会发生变化。当你变化了就知道哪些可用(还没分配)哪些不可用(被分配了)。并且我们depthMap不变，很简单一对比就知道你变了没变。
+
+#### 3.6.2、如何管理内存
+
+我们现在知道这个满二叉树的每一个节点其实对应的都是一个内存空间。
+
+netty定义了两个规则来处理分配：
+
+1、如果depthMap[i] = memoryMap[i]，此时说明这个数据和初始化一样，没动过，此时内存空间可用。
+
+2、如果memoryMap[i] = 12的时候，此时说明这个节点以及他的子节点都被分配了，不能再分配了。
+
+为啥是12呢，因为我们知道这个数组存的是层高，你树总高11，永远不会是12，他自己定义了规则，当你被改为12的时候，说明他被动过了。为啥要牵连子节点呢，因为实际分配的是他的叶子结点，他是按照page分配的。
+
+我们来理解一下。
+
+我们知道我们实际分配其实是分配的叶子结点。我这里以一个简单图来说明这个算法。之所以用简单图，是因为我不想画一个11层的满二叉树。太伤了。
+
+初始化的时候：是这样的，两个map存的一样。
+
+![image-20241112180259732](doc.assets/image-20241112180259732.png)
+
+当你2048号被分配了，他是一个叶子结点，就8k，此时会把memorymap[2048]改成12，此时他不等于depthMap[2048]了，并且他不能再被分配了。
+
+但是你2048是1024的子节点，你还有一个兄弟节点2049呢，此时1024还能分配8k呢，你1024不能改为12，netty的规则是此时1024的值改为两个叶子结点的存储值的最小值。2048现在已经是12了，那最小值就是2049存的11了，所以此时1024从10修改为11.变成这样。
+
+![image-20241112180642598](doc.assets/image-20241112180642598.png)
+
+此时netty在分配的时候发现你1024本来是10(和depthmap一对比就知道了)，此时你变了，而且还不是12，所以你还有可用的节点。
+
+所以实现其实很简单，只要发现memorymap[i] < depth map[i]就说明你还有部分空间可用。因为他取得是最小值，所以这个规则加持下就会保证这个逻辑。
+
+而且当你1024变为11了，1024的父节点也要变，变得就是1024和1025的最小值，然后一直往上递归，那一路全变了。这样就表达了你部分被使用了。
+
+而当你都是12的时候，这一路其实都是12了，那就都不能用了。
 
 
 
+**注意，我们16M能划分2048个8k，所以我们其实分配的是叶子结点，他只是构造了一个树，内结点不分配的。不然你就比2048个多的多了。**
+
+而且注意一点，我们划分normal的时候是分配的page，但是我们第一次获取tiny/small的时候也是要从chunk中获取page的(后续可能从划分的剩余小块获取)。也要符合我们的这个规则。
+
+他的整体规则就是你要分配多大，他给你向上取到一个2的n次方，那么此时你就能在树上找到对应的层。然后水平遍历这个层，看是不是能分配，能分配就占用，占完了改成12，然后往上递归改。如果父节点能分配，那就把父节点占了，然后把子节点直接都改为12，因为父节点用了，那子节点肯定也被用了。然后在往上递归改，取子节点最小值。
 
 
 
+## 4、分配过程
 
+我们来看一下arena是怎么分配的，我们看一下源码。
 
+io.netty.buffer.PoolArena#allocate(io.netty.buffer.PoolThreadCache, io.netty.buffer.PooledByteBuf<T>, int)
 
+~~~java
+private void allocate(PoolThreadCache cache, PooledByteBuf<T> buf, final int reqCapacity) {
+    final int normCapacity = normalizeCapacity(reqCapacity);
+    if (isTinyOrSmall(normCapacity)) { // capacity < pageSize
+        int tableIdx;
+        PoolSubpage<T>[] table;
+        boolean tiny = isTiny(normCapacity);
+        if (tiny) { // < 512
+          	/**
+          		其实你能看到，他不会先去chunk中走那颗树去分配，他会先从线程本地缓存去获取，也就是他会对你线程做缓存。类似于tl
+          		这样做是为了避免多个线程对arena的争用，避免线程竞争。因为arena是多线程共享的。
+          		并且可以避免在chunk的二叉树上去寻找，这样提高了计算效率。
+          		而这个PoolThreadCache是被fastThreadLocal存储在了InternalThreadLocalMap中，作为线程级别的缓存复用。
+          	*/
+            if (cache.allocateTiny(this, buf, reqCapacity, normCapacity)) {
+                // was able to allocate out of the cache so move on
+                return;
+            }
+            tableIdx = tinyIdx(normCapacity);
+            table = tinySubpagePools;
+        } else {
+            if (cache.allocateSmall(this, buf, reqCapacity, normCapacity)) {
+                // was able to allocate out of the cache so move on
+                return;
+            }
+            tableIdx = smallIdx(normCapacity);
+            table = smallSubpagePools;
+        }
 
+        final PoolSubpage<T> head = table[tableIdx];
 
+        /**
+         * Synchronize on the head. This is needed as {@link PoolChunk#allocateSubpage(int)} and
+         * {@link PoolChunk#free(long)} may modify the doubly linked list as well.
+         */
+        synchronized (head) {
+            final PoolSubpage<T> s = head.next;
+            if (s != head) {
+                assert s.doNotDestroy && s.elemSize == normCapacity;
+                long handle = s.allocate();
+                assert handle >= 0;
+                s.chunk.initBufWithSubpage(buf, null, handle, reqCapacity);
+                incTinySmallAllocation(tiny);
+                return;
+            }
+        }
+        synchronized (this) {
+            allocateNormal(buf, reqCapacity, normCapacity);
+        }
 
+        incTinySmallAllocation(tiny);
+        return;
+    }
+    if (normCapacity <= chunkSize) {
+        if (cache.allocateNormal(this, buf, reqCapacity, normCapacity)) {
+            // was able to allocate out of the cache so move on
+            return;
+        }
+        synchronized (this) {
+            allocateNormal(buf, reqCapacity, normCapacity);
+            ++allocationsNormal;
+        }
+    } else {
+        // Huge allocations are never served via the cache so just call allocateHuge
+        allocateHuge(buf, reqCapacity);
+    }
+}
+~~~
 
+PoolThreadCache
 
+~~~java
+private final MemoryRegionCache<byte[]>[] tinySubPageHeapCaches;
+private final MemoryRegionCache<byte[]>[] smallSubPageHeapCaches;
+private final MemoryRegionCache<ByteBuffer>[] tinySubPageDirectCaches;
+private final MemoryRegionCache<ByteBuffer>[] smallSubPageDirectCaches;
+private final MemoryRegionCache<byte[]>[] normalHeapCaches;
+private final MemoryRegionCache<ByteBuffer>[] normalDirectCaches;
+~~~
 
+你能看到他其实为每一种都分配了MemoryRegionCache这种缓存。而MemoryRegionCache是可以对tiny的32种规格都做缓存的，而且也可以对small的4种都做缓存。对于normal来说(8k-16M)，这种比较大的，他就只能缓存8k 16k 32k,再大就没了，不然多线程本地缓存怕是会爆炸。他会在这个里面缓存先获取，获取不到在走chunk做分配。
 
-
-
-
+![内存池流程图.drawio](doc.assets/内存池流程图.drawio.png)
 
 
 
